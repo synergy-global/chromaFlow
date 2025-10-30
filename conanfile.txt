@@ -1,0 +1,34 @@
+[requires]
+# Audio processing libraries
+# fftw/3.3.10
+# portaudio/19.7.0
+# audiofft/1.0.0
+
+# Math and linear algebra (alternative to CPM Eigen)
+# eigen/3.4.0
+
+# JSON handling
+# nlohmann_json/3.11.2
+
+# Testing frameworks
+# catch2/3.4.0
+# gtest/1.14.0
+
+# Utility libraries
+# fmt/10.1.1
+# spdlog/1.12.0
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[options]
+# Configure package options here
+# eigen:shared=False
+# gtest:shared=False
+
+[imports]
+# Copy shared libraries to bin folder for Windows
+bin, *.dll -> ./bin
+lib, *.dylib* -> ./bin  # macOS
+lib, *.so* -> ./bin     # Linux
