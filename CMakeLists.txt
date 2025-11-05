@@ -173,52 +173,6 @@ endif()
 # Compiler features
 target_compile_features(ChromaFlow INTERFACE cxx_std_17)
 
-# ==============================================================================
-# Installation
-# ==============================================================================
-
-# Install headers
-install(DIRECTORY chromaLib/
-    DESTINATION include/chromaLib
-    FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
-)
-
-# Install library target
-install(TARGETS ChromaFlow
-    EXPORT ChromaFlowTargets
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin
-    INCLUDES DESTINATION include
-)
-
-# Install CMake config files
-install(EXPORT ChromaFlowTargets
-    FILE ChromaFlowTargets.cmake
-    NAMESPACE ChromaFlow::
-    DESTINATION lib/cmake/ChromaFlow
-)
-
-# Create config file
-# Note: Package configuration disabled when used as submodule
-# include(CMakePackageConfigHelpers)
-# write_basic_package_version_file(
-#     ChromaFlowConfigVersion.cmake
-#     VERSION ${PROJECT_VERSION}
-#     COMPATIBILITY AnyNewerVersion
-# )
-
-# configure_package_config_file(
-#     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ChromaFlowConfig.cmake.in"
-#     "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfig.cmake"
-#     INSTALL_DESTINATION lib/cmake/ChromaFlow
-# )
-
-# install(FILES
-#     "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfig.cmake"
-#     "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfigVersion.cmake"
-#     DESTINATION lib/cmake/ChromaFlow
-# )
 
 # ==============================================================================
 # Testing (Optional)
