@@ -49,6 +49,35 @@ TEST_CASE("ChromaUtils utility functions", "[ChromaUtils][Utilities]") {
         REQUIRE(result[3] == Approx(0.0f));
         REQUIRE(result[4] == Approx(1.0f));
     }
+    
+    SECTION("Unit normalization") {
+        // 0..100
+        REQUIRE(ChromaUtils::mapToUnit(0.0f, 0.0f, 100.0f) == Approx(0.0f));
+        REQUIRE(ChromaUtils::mapToUnit(50.0f, 0.0f, 100.0f) == Approx(0.5f));
+        REQUIRE(ChromaUtils::mapToUnit(100.0f, 0.0f, 100.0f) == Approx(1.0f));
+
+        // 0..30
+        REQUIRE(ChromaUtils::mapToUnit(0.0f, 0.0f, 30.0f) == Approx(0.0f));
+        REQUIRE(ChromaUtils::mapToUnit(15.0f, 0.0f, 30.0f) == Approx(0.5f));
+        REQUIRE(ChromaUtils::mapToUnit(30.0f, 0.0f, 30.0f) == Approx(1.0f));
+
+        // 1..5
+        REQUIRE(ChromaUtils::mapToUnit(1.0f, 1.0f, 5.0f) == Approx(0.0f));
+        REQUIRE(ChromaUtils::mapToUnit(3.0f, 1.0f, 5.0f) == Approx(0.5f));
+        REQUIRE(ChromaUtils::mapToUnit(5.0f, 1.0f, 5.0f) == Approx(1.0f));
+
+        // Reversed range 5..1
+        REQUIRE(ChromaUtils::mapToUnit(1.0f, 5.0f, 1.0f) == Approx(0.0f));
+        REQUIRE(ChromaUtils::mapToUnit(3.0f, 5.0f, 1.0f) == Approx(0.5f));
+        REQUIRE(ChromaUtils::mapToUnit(5.0f, 5.0f, 1.0f) == Approx(1.0f));
+
+        // Clamping beyond bounds
+        REQUIRE(ChromaUtils::mapToUnit(-10.0f, 0.0f, 100.0f) == Approx(0.0f));
+        REQUIRE(ChromaUtils::mapToUnit(110.0f, 0.0f, 100.0f) == Approx(1.0f));
+
+        // Degenerate range
+        REQUIRE(ChromaUtils::mapToUnit(42.0f, 10.0f, 10.0f) == Approx(0.0f));
+    }
 }
 
 TEST_CASE("ChromaUtils audio statistics", "[ChromaUtils][AudioStats]") {

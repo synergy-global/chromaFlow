@@ -131,6 +131,7 @@
         "limits": "cpp",
         "mutex": "cpp",
         "print": "cpp",
-        "ratio": "cpp"
+        "ratio": "cpp",
+        "regex": "cpp"
     }
 }

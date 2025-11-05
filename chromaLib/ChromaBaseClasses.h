@@ -101,7 +101,6 @@ public:
     virtual Eigen::VectorXf update(const Eigen::VectorXf& parameter,
                                     const Eigen::VectorXf& gradient,
                                     const FeatureTensor& features) = 0;
-    // ... existing code ...
     // New in-place overloads to match layer usage patterns
     virtual void update(Eigen::VectorXf& parameter,
                         const Eigen::VectorXf& gradient,
@@ -221,6 +220,28 @@ public:
         
         return m4 / (m2 * m2) - 3.0f;
     }
+    
+    // Maps a value from an arbitrary range [range_min, range_max] into [0, 1].
+    // - Handles reversed ranges (min > max)
+    // - If the range is degenerate (min == max), returns 0.0f
+    // - When clamp=true, clamps the result into [0, 1]
+    static float mapToUnit(float value, float range_min, float range_max, bool clamp = true) {
+        float lower = std::min(range_min, range_max);
+        float upper = std::max(range_min, range_max);
+        float denom = upper - lower;
+    
+        if (denom <= 1e-12f) {
+            return 0.0f;
+        }
+    
+        float t = (value - lower) / denom;
+        if (clamp) {
+            t = std::max(0.0f, std::min(1.0f, t));
+        }
+        return t;
+    }
 };
+
+
 
 } // namespace ChromaFlow
