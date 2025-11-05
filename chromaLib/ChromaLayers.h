@@ -8,7 +8,7 @@
 #include <string>
 #include <unordered_set>
 #include <unordered_map>
-
+#include <optional>
 #include <algorithm>
 // Include the definition of ChromaUtils::clip
 namespace ChromaUtils {
@@ -44,7 +44,7 @@ namespace ChromaFlow
     public:
         // Construct from explicit names and set of names that invert user intent (e.g., "damping")
         Collaborator (std::map<std::string, float> param_names_map, std::optional<std::unordered_set<std::string>> invert_names = std::nullopt)
-            : invert_user (invert_names ? *invert_names : std::unordered_set<std::string>{})
+            : invert_user (invert_names.value_or(std::unordered_set<std::string>{}))
         {
             // Materialize the ordered list of parameter names from the provided map
             param_names.reserve (param_names_map.size());
@@ -84,7 +84,8 @@ namespace ChromaFlow
                 const float ai_val = get_ai_val(i);
 
                 float intent = 0.0f;
-                if (auto it = user_params.data.find(name); it != user_params.data.end())
+                auto it = user_params.data.find(name);
+                if (it != user_params.data.end())
                 {
                     intent = std::fmin(1.0f, std::fmax(0.0f, it->second));
                 }
@@ -641,5 +642,23 @@ namespace ChromaFlow
             }
         }
     };
+// contextual layers
 
+class temporalLayer : public DifferentiableModule
+{
+public:
+    temporalLayer (int input_size, int hidden_size, float learningRate = 0.001f, float momentum = 0.9f)
+    {
+    }
+
+    FeatureTensor forward (const FeatureTensor& x_t) override
+    {
+        return x_t;
+    }
+
+    private:
+
+    // rnn
+    // std
+};
 } // namespace ChromaFlow

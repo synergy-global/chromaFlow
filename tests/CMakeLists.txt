@@ -17,10 +17,7 @@ if(CHROMAFLOW_USE_CATCH2)
         ${CMAKE_CURRENT_SOURCE_DIR}/../chromaLib
     )
     
-    # Register tests with CTest
-    include(CTest)
-    include(Catch)
-    catch_discover_tests(chromaflow_tests)
+    # No CTest integration; run the Catch2 binary directly
     
 else()
     # Google Test tests (alternative)
@@ -39,9 +36,7 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/../chromaLib
     )
     
-    # Register tests with CTest
-    include(GoogleTest)
-    gtest_discover_tests(chromaflow_tests)
+    # No CTest integration; run the test binary directly
 endif()
 
 # Set C++ standard for tests

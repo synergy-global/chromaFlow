@@ -17,6 +17,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Determine if we are the top-level project
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(CHROMAFLOW_IS_TOP_LEVEL ON)
+else()
+    set(CHROMAFLOW_IS_TOP_LEVEL OFF)
+endif()
+
 # Compiler flags
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
@@ -82,8 +89,12 @@ if(CHROMAFLOW_BUILD_TESTS)
             VERSION 3.4.0
             OPTIONS
                 "CATCH_INSTALL_DOCS OFF"
-                "CATCH_INSTALL_EXTRAS OFF"
+                "CATCH_INSTALL_EXTRAS ON"
         )
+        # Provide Catch2's CMake module (for catch_discover_tests)
+        if(Catch2_SOURCE_DIR)
+            list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
+        endif()
     else()
         # Google Test for testing (alternative)
         CPMAddPackage(
@@ -112,14 +123,14 @@ endif()
 # ==============================================================================
 # Dependencies via FetchContent
 # ==============================================================================
-
-FetchContent_Declare(fft
-    GIT_REPOSITORY https://github.com/HiFi-LoFi/AudioFFT.git
-    GIT_TAG master
-    SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/Modules/fft
-
-)
-FetchContent_MakeAvailable(fft)
+option(CHROMAFLOW_USE_AUDIOFFT "Include AudioFFT library" OFF)
+if(CHROMAFLOW_USE_AUDIOFFT)
+    FetchContent_Declare(AudioFFT
+        GIT_REPOSITORY https://github.com/HiFi-LoFi/AudioFFT.git
+        GIT_TAG master
+    )
+    FetchContent_MakeAvailable(AudioFFT)
+endif()
 
  
 # ==============================================================================
@@ -154,7 +165,10 @@ if(CHROMAFLOW_USE_JSON AND TARGET nlohmann_json::nlohmann_json)
     target_link_libraries(ChromaFlow INTERFACE nlohmann_json::nlohmann_json)
 endif()
 
-target_link_libraries(ChromaFlow INTERFACE fft)
+# Link AudioFFT when enabled and available
+if(CHROMAFLOW_USE_AUDIOFFT AND TARGET AudioFFT)
+    target_link_libraries(ChromaFlow INTERFACE AudioFFT)
+endif()
 
 # Compiler features
 target_compile_features(ChromaFlow INTERFACE cxx_std_17)
@@ -186,38 +200,38 @@ install(EXPORT ChromaFlowTargets
 )
 
 # Create config file
-include(CMakePackageConfigHelpers)
-write_basic_package_version_file(
-    ChromaFlowConfigVersion.cmake
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY AnyNewerVersion
-)
+# Note: Package configuration disabled when used as submodule
+# include(CMakePackageConfigHelpers)
+# write_basic_package_version_file(
+#     ChromaFlowConfigVersion.cmake
+#     VERSION ${PROJECT_VERSION}
+#     COMPATIBILITY AnyNewerVersion
+# )
 
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ChromaFlowConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfig.cmake"
-    INSTALL_DESTINATION lib/cmake/ChromaFlow
-)
+# configure_package_config_file(
+#     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ChromaFlowConfig.cmake.in"
+#     "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfig.cmake"
+#     INSTALL_DESTINATION lib/cmake/ChromaFlow
+# )
 
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfigVersion.cmake"
-    DESTINATION lib/cmake/ChromaFlow
-)
+# install(FILES
+#     "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfig.cmake"
+#     "${CMAKE_CURRENT_BINARY_DIR}/ChromaFlowConfigVersion.cmake"
+#     DESTINATION lib/cmake/ChromaFlow
+# )
 
 # ==============================================================================
 # Testing (Optional)
 # ==============================================================================
-
 if(CHROMAFLOW_BUILD_TESTS)
-    enable_testing()
-    
-    if(CHROMAFLOW_USE_CATCH2 AND TARGET Catch2::Catch2WithMain)
-        # Catch2 is available
-        add_subdirectory(tests)
-    elseif(NOT CHROMAFLOW_USE_CATCH2 AND TARGET gtest_main)
-        # Google Test is available
-        add_subdirectory(tests)
+    add_subdirectory(tests)
+
+    # Convenience target: run Catch2 test binary directly (no CTest)
+    if(CHROMAFLOW_IS_TOP_LEVEL)
+        add_custom_target(tests
+            COMMAND $<TARGET_FILE:chromaflow_tests>
+            DEPENDS chromaflow_tests
+        )
     endif()
 endif()
 

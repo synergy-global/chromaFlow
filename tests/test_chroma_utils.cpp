@@ -13,7 +13,8 @@ TEST_CASE("ChromaUtils activation functions", "[ChromaUtils][ActivationFunctions
         
         // Test extreme values
         REQUIRE(ChromaUtils::sigmoid(10.0f) == Approx(1.0f).epsilon(0.001f));
-        REQUIRE(ChromaUtils::sigmoid(-10.0f) == Approx(0.0f).epsilon(0.001f));
+        // Near zero, use absolute margin since relative epsilon isn't meaningful
+        REQUIRE(ChromaUtils::sigmoid(-10.0f) == Approx(0.0f).margin(1e-4f));
     }
     
     SECTION("Tanh function") {
@@ -82,8 +83,9 @@ TEST_CASE("ChromaUtils audio statistics", "[ChromaUtils][AudioStats]") {
     SECTION("Kurtosis calculation") {
         std::vector<float> normalData = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
         float kurtosis = ChromaUtils::calculateKurtosis(normalData);
-        // Normal distribution should have kurtosis around 3
-        REQUIRE(kurtosis > 0.0f);
+        // This function returns excess kurtosis (kurtosis - 3). For this platykurtic sample,
+        // the expected excess kurtosis is approximately -1.3.
+        REQUIRE(kurtosis == Approx(-1.3f).margin(0.05f));
     }
 }
 
