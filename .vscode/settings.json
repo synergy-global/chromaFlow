@@ -132,6 +132,8 @@
         "mutex": "cpp",
         "print": "cpp",
         "ratio": "cpp",
-        "regex": "cpp"
+        "regex": "cpp",
+        "dense": "cpp",
+        "eigen": "cpp"
     }
 }
