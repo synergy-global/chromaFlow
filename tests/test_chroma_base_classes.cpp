@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include "chromaLib/ChromaBaseClasses.h"
+#include "chromaLib/ChromaLayers.h"
 
 using namespace ChromaFlow;
 using Catch::Approx;
@@ -77,5 +78,132 @@ TEST_CASE("WeightTensor basic functionality", "[WeightTensor]") {
         
         REQUIRE(output.rows() == 10);
         REQUIRE(output.cols() == 1);
+    }
+}
+
+TEST_CASE("NNAnalyzer parameter counting and memory estimates", "[NNAnalyzer]") {
+    SECTION("Dense layer with bias") {
+        const size_t inputSize = 128;
+        const size_t outputSize = 64;
+        const bool hasBias = true;
+        const size_t expected = 128 * 64 + 64; // 8256
+        REQUIRE(NNAnalyzer::countTrainableParameters(inputSize, outputSize, hasBias) == expected);
+    }
+
+    SECTION("Conv-like without bias") {
+        const size_t inputSize = 32;
+        const size_t outputSize = 16;
+        const bool hasBias = false;
+        const size_t expected = 32 * 16; // 512
+        REQUIRE(NNAnalyzer::countTrainableParameters(inputSize, outputSize, hasBias) == expected);
+    }
+
+    SECTION("SGD memory footprint (float)") {
+        const size_t params = 1000;
+        const bool isAdam = false;
+        const size_t bytes = NNAnalyzer::calculateTotalMemory(params, isAdam, 4);
+        // params + 1 state vector (momentum)
+        REQUIRE(bytes == (1000 * 4 + 1000 * 4)); // 8000
+    }
+
+    SECTION("Adam memory footprint (float)") {
+        const size_t params = 1000;
+        const bool isAdam = true;
+        const size_t bytes = NNAnalyzer::calculateTotalMemory(params, isAdam, 4);
+        // params + 2 state vectors (m, v)
+        REQUIRE(bytes == (1000 * 4 + 2000 * 4)); // 12000
+    }
+
+    SECTION("Adam memory footprint (double)") {
+        const size_t params = 500;
+        const bool isAdam = true;
+        const size_t bytes = NNAnalyzer::calculateTotalMemory(params, isAdam, 8);
+        REQUIRE(bytes == (500 * 8 + 1000 * 8)); // 12000
+    }
+}
+
+TEST_CASE("NNAnalyzer model-level counting aggregates across layers", "[NNAnalyzer]") {
+    using namespace ChromaFlow;
+    using std::shared_ptr;
+    using std::make_shared;
+
+    // Build a simple model: Conv(4x3) + Dense(5->3) + RNN(5->3)
+    std::vector<std::shared_ptr<DifferentiableModule>> modules;
+    modules.emplace_back(make_shared<convolutionalLayer>(/*inputChannels*/1, /*outputChannels*/4, /*kernelSize*/3));
+    modules.emplace_back(make_shared<denseLayer>(/*inputSize*/5, /*outputSize*/3, ActivationType::LeakyRelu, /*useLayerNorm*/true));
+    modules.emplace_back(make_shared<RNNCell>(/*inputSize*/5, /*hiddenSize*/3));
+
+    // Expected counts:
+    // Conv: weights_ (4x3) + biases_ (4) = 12 + 4 = 16
+    // Dense: weights (3x5) + gamma (3) + beta (3) + alpha (5) = 15 + 3 + 3 + 5 = 26
+    // RNN: W_x (3x5) + W_h (3x3) + b (3) = 15 + 9 + 3 = 27
+    const size_t expected_total = 16 + 26 + 27; // 69
+
+    const size_t counted = NNAnalyzer::countTrainableParameters(modules);
+    REQUIRE(counted == expected_total);
+
+    // Memory calculation for SGD (two copies per param), float32 (4 bytes)
+    const size_t mem_sgd = NNAnalyzer::calculateTotalMemoryForModel(modules, /*isAdam*/false, /*dataTypeSizeBytes*/4);
+    REQUIRE(mem_sgd == expected_total * 1 * 4 + expected_total * 1 * 4);
+
+    // Memory calculation for Adam (four copies per param), float32 (4 bytes)
+    const size_t mem_adam = NNAnalyzer::calculateTotalMemoryForModel(modules, /*isAdam*/true, /*dataTypeSizeBytes*/4);
+    REQUIRE(mem_adam == expected_total * 1 * 4 + expected_total * 2 * 4);
+}
+
+TEST_CASE("NNAnalyzer parameter counting and memory calculation", "[NNAnalyzer]") {
+    SECTION("countTrainableParameters for dense layer with bias") {
+        size_t inputSize = 128;
+        size_t outputSize = 64;
+        bool hasBias = true;
+        
+        size_t result = NNAnalyzer::countTrainableParameters(inputSize, outputSize, hasBias);
+        size_t expected = (128 * 64) + 64; // 8256 parameters
+        
+        REQUIRE(result == expected);
+    }
+    
+    SECTION("countTrainableParameters for conv layer without bias") {
+        size_t inputSize = 32;
+        size_t outputSize = 16;
+        bool hasBias = false;
+        
+        size_t result = NNAnalyzer::countTrainableParameters(inputSize, outputSize, hasBias);
+        size_t expected = 32 * 16; // 512 parameters
+        
+        REQUIRE(result == expected);
+    }
+    
+    SECTION("calculateTotalMemory for SGD optimizer") {
+        size_t totalParameters = 1000;
+        bool isAdam = false;
+        size_t sampleTypeSize = 4;
+        
+        size_t result = NNAnalyzer::calculateTotalMemory(totalParameters, isAdam, sampleTypeSize);
+        size_t expected = (1000 * 4) + (1000 * 4); // 8000 bytes (params + momentum)
+        
+        REQUIRE(result == expected);
+    }
+    
+    SECTION("calculateTotalMemory for Adam optimizer") {
+        size_t totalParameters = 1000;
+        bool isAdam = true;
+        size_t sampleTypeSize = 4;
+        
+        size_t result = NNAnalyzer::calculateTotalMemory(totalParameters, isAdam, sampleTypeSize);
+        size_t expected = (1000 * 4) + (2000 * 4); // 12000 bytes (params + momentum + variance)
+        
+        REQUIRE(result == expected);
+    }
+    
+    SECTION("calculateTotalMemory with double precision") {
+        size_t totalParameters = 500;
+        bool isAdam = true;
+        size_t sampleTypeSize = 8;
+        
+        size_t result = NNAnalyzer::calculateTotalMemory(totalParameters, isAdam, sampleTypeSize);
+        size_t expected = (500 * 8) + (1000 * 8); // 12000 bytes (params + momentum + variance with double)
+        
+        REQUIRE(result == expected);
     }
 }

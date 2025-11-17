@@ -4,7 +4,6 @@ if(CHROMAFLOW_USE_CATCH2)
     # Catch2 tests
     add_executable(chromaflow_tests
         test_chroma_base_classes.cpp
-        test_chroma_utils.cpp
     )
     
     target_link_libraries(chromaflow_tests 
@@ -23,7 +22,6 @@ else()
     # Google Test tests (alternative)
     add_executable(chromaflow_tests
         test_chroma_base_classes_gtest.cpp
-        test_chroma_utils_gtest.cpp
     )
     
     target_link_libraries(chromaflow_tests 

@@ -239,6 +239,14 @@ namespace ChromaFlow
             // TODO: Implement reset logic
         }
 
+        
+
+        // Trainable parameters: weights_ and biases_
+        size_t getNumParams() const override {
+            return static_cast<size_t>(weights_.rows()) * static_cast<size_t>(weights_.cols())
+                 + static_cast<size_t>(biases_.size());
+        }
+
     private:
         Eigen::MatrixXf weights_;
         Eigen::VectorXf biases_;
@@ -259,6 +267,7 @@ namespace ChromaFlow
               activation_type (activation),
               use_layer_norm (useLayerNorm),
               optimizer (learningRate, momentum),
+              optimizer_alpha (learningRate, momentum),
               gamma (Eigen::VectorXf::Ones(outputSize)),
               beta (Eigen::VectorXf::Zero(outputSize))
         {
@@ -272,20 +281,14 @@ namespace ChromaFlow
                     weights (o, i) = randUniform (-limit, limit);
                 }
             }
+            // Initialize statistical context memory
+            input_ema_state.setZero(input_size);
+            learnable_alpha.setConstant(input_size, 0.5f); // Start midway
         }
 
-        // Single-arg forward delegates to two-arg overload with empty user biases
+        // Single-arg forward is the primary path (removes user_biases dependency)
         FeatureTensor forward (const FeatureTensor& upstream_features) override
         {
-            static const ParamTensor emptyBiases;
-            return forward(upstream_features, emptyBiases);
-        }
-
-        // Forward over a 1D feature Tensor; user_biases is optional and must match output_size if provided.
-        FeatureTensor forward (const FeatureTensor& upstream_features,
-            const ParamTensor& user_biases) override
-        {
-            // Ensure we operate on a 1D feature vector (first row if sequence)
             const int cols = static_cast<int>(upstream_features.data.cols());
             Eigen::VectorXf x(cols);
             if (upstream_features.data.rows() > 0)
@@ -293,13 +296,10 @@ namespace ChromaFlow
             else
                 x.setZero();
 
-            // Adapt input length to the layer's expected input_size
+            // Adapt input length
             if (cols != input_size)
             {
-                if (cols > input_size)
-                {
-                    x = x.head(static_cast<Eigen::Index>(input_size));
-                }
+                if (cols > input_size) x = x.head(static_cast<Eigen::Index>(input_size));
                 else
                 {
                     Eigen::VectorXf xPadded(static_cast<Eigen::Index>(input_size));
@@ -309,55 +309,35 @@ namespace ChromaFlow
                 }
             }
 
-            // Calculate weights - use explicit evaluation to avoid template issues
-            // Eigen-Optimized Matrix Multiplication (Original code retained this optimal line)
-            Eigen::VectorXf z = (weights * x).eval(); // Weights [O x I] * x [I x 1] -> z [O x 1]
+            // --- CRITICAL FIX: Learnable Statistical Context (EMA) ---
+            if (input_ema_state.size() != input_size) input_ema_state.setZero(input_size);
+            
+            // Apply learned alpha and update state (EMA: new = (1-alpha)*old + alpha*current)
+            Eigen::VectorXf one_minus_alpha = Eigen::VectorXf::Constant(input_size, 1.0f) - learnable_alpha;
+            input_ema_state = input_ema_state.cwiseProduct(one_minus_alpha) + x.cwiseProduct(learnable_alpha);
+            
+            // --- CORE LINEAR TRANSFORMATION (Biases Fused/Removed) ---
+            // W * mu_t (NO explicit bias term 'b' due to Fusion)
+            Eigen::VectorXf z = (weights * input_ema_state).eval(); 
 
-
-            // Optional layer normalization
+            // Layer normalization (where beta acts as the implicit bias/shift)
             if (use_layer_norm)
             {
                 const float mean = z.mean();
                 const float var = std::max (1e-6f, static_cast<float> ((z.array() - mean).square().mean()));
                 Eigen::VectorXf norm = ((z.array() - mean) / std::sqrt (var)).matrix();
-                // gamma and beta are 1D params of length output_size
-                Eigen::Map<const Eigen::VectorXf> gammaVec (gamma.data(), static_cast<Eigen::Index> (gamma.size()));
-                Eigen::Map<const Eigen::VectorXf> betaVec (beta.data(), static_cast<Eigen::Index> (beta.size()));
-                z = (gammaVec.cwiseProduct (norm) + betaVec).eval();
-            }
-
-            // Optional user biases (map-backed ParamTensor)
-            if (!user_biases.data.empty())
-            {
-                const int n = std::min<int> (z.size(), static_cast<int> (user_biases.data.size()));
-                Eigen::VectorXf biasVec(n);
-                int idx = 0;
-                for (const auto& kv : user_biases.data)
-                {
-                    if (idx >= n) break;
-                    biasVec[static_cast<Eigen::Index>(idx)] = kv.second;
-                    ++idx;
-                }
-                z.head(n) += biasVec;
+                z = (gamma.cwiseProduct (norm) + beta).eval(); // beta is the fused bias
             }
 
             // Activation
-            Eigen::VectorXf a = z;
-            switch (activation_type)
-            {
-                case ActivationType::LeakyRelu:
-                    a = z.unaryExpr ([] (float v) { return v >= 0.0f ? v : 0.01f * v; }).eval();
-                    break;
-                case ActivationType::Tanh:
-                    a = z.array().tanh().matrix().eval();
-                    break;
-                case ActivationType::Sigmoid:
-                    a = (1.0f / (1.0f + (-z.array()).exp())).matrix().eval();
-                    break;
-                case ActivationType::Linear:
-                    a = z;
-                    break;
-            }
+            Eigen::VectorXf a = z.unaryExpr ([this](float v) {
+                switch (activation_type) {
+                    case ActivationType::LeakyRelu: return v >= 0.0f ? v : 0.01f * v;
+                    case ActivationType::Tanh: return std::tanh (v);
+                    case ActivationType::Sigmoid: return 1.0f / (1.0f + std::exp (-v));
+                    case ActivationType::Linear: default: return v;
+                }
+            }).eval();
 
             FeatureTensor out;
             out.data.resize(1, static_cast<Eigen::Index>(a.size()));
@@ -367,35 +347,56 @@ namespace ChromaFlow
             return out;
         }
 
-        // Simplified learning rule: outer product of gradient and input features.
-        // --- CRITICAL PERFORMANCE FIX (Point 7) ---
+        // --- Principal SWE Learning and Getters ---
+        
         void learn (const FeatureTensor& gradient_from_output,
             const FeatureTensor& features_from_input,
             FeatureTensor& upstream_features) override
         {
-            if (gradient_from_output.features != output_size
-                || features_from_input.features != input_size)
-            {
-                return;
-            }
+            if (gradient_from_output.features != output_size || features_from_input.features != input_size) return;
 
-            // Get gradient and feature vectors (make sure they are 1D column vectors)
-            Eigen::VectorXf grad_out = gradient_from_output.data.row(0).transpose(); // [O x 1]
-            Eigen::VectorXf features_in = features_from_input.data.row(0).transpose(); // [I x 1]
+            Eigen::VectorXf grad_out = gradient_from_output.data.row(0).transpose();
 
-            // grad_W[o][i] = grad[o] * x[i] is an Outer Product: [O x 1] * [1 x I] -> [O x I]
-            Eigen::MatrixXf grad_W = grad_out * features_in.transpose();
-
-            // Update optimizer
-            optimizer.update (weights, grad_W, upstream_features);
+            // 1. Wx gradient (w.r.t EMA state, mu_t)
+            Eigen::MatrixXf grad_W = grad_out * input_ema_state.transpose();
             
-            // NOTE: For true backprop, the gradient w.r.t the input (upstream_features) needs
-            // to be calculated: grad_input = weights.transpose() * grad_out;
+            // 2. Layer Norm gradient (simplified)
+            Eigen::VectorXf grad_gamma = grad_out.cwiseProduct(input_ema_state);
+            Eigen::VectorXf grad_beta = grad_out;
+
+            // 3. CRITICAL: Learnable Alpha Gradient (Simplifed)
+            Eigen::VectorXf d_alpha_d_Araw = learnable_alpha.array() * (Eigen::VectorXf::Constant(input_size, 1.0f) - learnable_alpha).array();
+            Eigen::VectorXf error_signal_mu = features_from_input.data.row(0).transpose() - input_ema_state;
+            Eigen::VectorXf grad_alpha = error_signal_mu.cwiseProduct(grad_out)
+                                           .cwiseProduct(d_alpha_d_Araw);
+
+            // Update all parameters (Weights, LN, and Learnable Alpha)
+            optimizer.update (weights, grad_W, upstream_features);
+            optimizer.update (gamma, grad_gamma, upstream_features);
+            optimizer.update (beta, grad_beta, upstream_features);
+            optimizer_alpha.update(learnable_alpha, grad_alpha, upstream_features);
         }
 
-        void reset() override
-        {
-            // TODO: Implement reset logic
+        // --- Getters and Setters for NNAnalyzer and Persistence ---
+        const Eigen::MatrixXf& getWeights() const { return weights; }
+        const Eigen::VectorXf& getGamma() const { return gamma; }
+        const Eigen::VectorXf& getBeta() const { return beta; }
+        const Eigen::VectorXf& getAlpha() const { return learnable_alpha; }
+        
+        void setWeights(const Eigen::MatrixXf& W) { weights = W; }
+        void setGamma(const Eigen::VectorXf& G) { gamma = G; }
+        void setBeta(const Eigen::VectorXf& B) { beta = B; }
+        void setAlpha(const Eigen::VectorXf& A) { learnable_alpha = A; }
+
+        void reset() override { input_ema_state.setZero(); }
+
+        // Trainable parameters: weights, gamma, beta, learnable_alpha
+        size_t getNumParams() const override {
+            const size_t w = static_cast<size_t>(weights.rows()) * static_cast<size_t>(weights.cols());
+            const size_t g = static_cast<size_t>(gamma.size());
+            const size_t b = static_cast<size_t>(beta.size());
+            const size_t a = static_cast<size_t>(learnable_alpha.size());
+            return w + g + b + a;
         }
 
     private:
@@ -405,35 +406,15 @@ namespace ChromaFlow
         bool use_layer_norm;
 
         Eigen::MatrixXf weights; // [output_size][input_size]
-        Eigen::VectorXf gamma; // layer norm scale
-        Eigen::VectorXf beta; // layer norm shift
+        Eigen::VectorXf gamma; // Layer Norm Scale 
+        Eigen::VectorXf beta;  // Layer Norm Shift (Fused Bias)
 
-        ChromaFlow::SGDWithMomentum optimizer;
+        Eigen::VectorXf input_ema_state; // Learnable Statistical Context (mu_t-1)
+        Eigen::VectorXf learnable_alpha; // Trainable EMA decay rate (A_raw)
 
-        void applyActivation (std::vector<float>& z) const
-        {
-            switch (activation_type)
-            {
-                case ActivationType::LeakyRelu:
-                    for (auto& v : z)
-                        v = v > 0.0f ? v : 0.1f * v;
-                    break;
-                case ActivationType::Tanh:
-                    for (auto& v : z)
-                        v = std::tanh (v);
-                    break;
-                case ActivationType::Sigmoid:
-                    for (auto& v : z)
-                        v = 1.0f / (1.0f + std::exp (-v));
-                    break;
-                case ActivationType::Linear:
-                default:
-                    // No-op
-                    break;
-            }
-        }
+        SGDWithMomentum optimizer;
+        SGDWithMomentum optimizer_alpha; 
     };
-
     class attentionLayer : public DifferentiableModule
     {
     public:
@@ -461,9 +442,9 @@ namespace ChromaFlow
         FeatureTensor forward (const FeatureTensor& input) override
         {
             // Query, Key, Value using first-row feature vectors
-            FeatureTensor qT = queryLayer->forward (input, ParamTensor{});
-            FeatureTensor kT = keyLayer->forward (input, ParamTensor{});
-            FeatureTensor vT = valueLayer->forward (input, ParamTensor{});
+            FeatureTensor qT = queryLayer->forward (input);
+            FeatureTensor kT = keyLayer->forward (input);
+            FeatureTensor vT = valueLayer->forward (input);
 
             Eigen::VectorXf query = qT.data.row(0).transpose();
             Eigen::VectorXf key = kT.data.row(0).transpose();
@@ -510,6 +491,15 @@ namespace ChromaFlow
         void reset() override
         {
             // TODO: Implement reset logic
+        }
+
+        // Trainable parameters: own weights plus child dense layers
+        size_t getNumParams() const override {
+            size_t total = static_cast<size_t>(weights.rows()) * static_cast<size_t>(weights.cols());
+            if (queryLayer) total += queryLayer->getNumParams();
+            if (keyLayer) total += keyLayer->getNumParams();
+            if (valueLayer) total += valueLayer->getNumParams();
+            return total;
         }
 
     private:
@@ -609,6 +599,14 @@ namespace ChromaFlow
             hidden_state.setZero();
             last_input.setZero();
             last_hidden_prev.setZero();
+        }
+
+        // Trainable parameters: W_x, W_h, b
+        size_t getNumParams() const override {
+            const size_t wx = static_cast<size_t>(W_x.rows()) * static_cast<size_t>(W_x.cols());
+            const size_t wh = static_cast<size_t>(W_h.rows()) * static_cast<size_t>(W_h.cols());
+            const size_t vb = static_cast<size_t>(b.size());
+            return wx + wh + vb;
         }
 
     private:
