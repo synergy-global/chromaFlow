@@ -133,11 +133,12 @@ TEST_CASE("NNAnalyzer model-level counting aggregates across layers", "[NNAnalyz
     modules.emplace_back(make_shared<denseLayer>(/*inputSize*/5, /*outputSize*/3, ActivationType::LeakyRelu, /*useLayerNorm*/true));
     modules.emplace_back(make_shared<RNNCell>(/*inputSize*/5, /*hiddenSize*/3));
 
-    // Expected counts:
-    // Conv: weights_ (4x3) + biases_ (4) = 12 + 4 = 16
+    // Expected counts reflect current layer implementations:
+    // Conv: kernel is not trainable by default (uses implicit ones), only bias vector is trainable
+    //       => biases_.size() = 4
     // Dense: weights (3x5) + gamma (3) + beta (3) + alpha (5) = 15 + 3 + 3 + 5 = 26
-    // RNN: W_x (3x5) + W_h (3x3) + b (3) = 15 + 9 + 3 = 27
-    const size_t expected_total = 16 + 26 + 27; // 69
+    // RNN:   W_x (3x5) + W_h (3x3) + b (3) = 15 + 9 + 3 = 27
+    const size_t expected_total = 4 + 26 + 27; // 57
 
     const size_t counted = NNAnalyzer::countTrainableParameters(modules);
     REQUIRE(counted == expected_total);
