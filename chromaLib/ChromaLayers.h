@@ -29,6 +29,99 @@ enum class ActivationType {
     Linear
 };
 
+class Collaborator : public DifferentiableModule
+{
+public:
+    Collaborator (std::map<std::string, float> param_names_map, std::optional<std::unordered_set<std::string>> invert_names = std::nullopt)
+        : invert_user (invert_names.value_or(std::unordered_set<std::string>{}))
+    {
+        param_names.reserve (param_names_map.size());
+        for (const auto& kv : param_names_map)
+        {
+            param_names.push_back (kv.first);
+            last_params_map[kv.first] = kv.second;
+        }
+    }
+
+    FeatureTensor forward (const FeatureTensor& input) override { return input; }
+
+    ParamTensor predictParams(const FeatureTensor& aiParamWeights, const ParamTensor& user_params) override
+    {
+        const Eigen::Index rows = aiParamWeights.data.rows();
+        const Eigen::Index cols = aiParamWeights.data.cols();
+        const size_t n_names = param_names.size();
+
+        auto get_ai_val = [&](size_t i) -> float {
+            if (rows == 1 && static_cast<Eigen::Index>(i) < cols)
+                return aiParamWeights.data(0, static_cast<Eigen::Index>(i));
+            if (cols == 1 && static_cast<Eigen::Index>(i) < rows)
+                return aiParamWeights.data(static_cast<Eigen::Index>(i), 0);
+            if (rows >= 1 && static_cast<Eigen::Index>(i) < cols)
+                return aiParamWeights.data(0, static_cast<Eigen::Index>(i));
+            return 0.0f;
+        };
+
+        ParamTensor out;
+        last_params_map.clear();
+
+        for (size_t i = 0; i < n_names; ++i)
+        {
+            const std::string& name = param_names[i];
+            const float ai_val = get_ai_val(i);
+
+            float intent = 0.0f;
+            auto it = user_params.data.find(name);
+            if (it != user_params.data.end())
+            {
+                intent = std::fmin(1.0f, std::fmax(0.0f, it->second));
+            }
+
+            float final_val;
+            if (intent == 0.0f)
+            {
+                final_val = ai_val;
+            }
+            else
+            {
+                const float ai_weight = 1.0f - intent;
+                const float user_weight = intent;
+                const float ai_val_scaled = ai_val * 0.2f;
+                const bool invert = invert_user.find(name) != invert_user.end();
+                const float user_contribution = invert ? (1.0f - it->second) : it->second;
+
+                final_val = ai_val_scaled * ai_weight + user_contribution * user_weight;
+            }
+
+            out.data[name] = final_val;
+            last_params_map[name] = final_val;
+        }
+
+        return out;
+    }
+
+    const std::unordered_map<std::string, float>& lastParams() const { return last_params_map; }
+
+    void reset() override
+    {
+        last_params_map.clear();
+    }
+
+private:
+    std::vector<std::string> param_names;
+    std::unordered_set<std::string> invert_user;
+    std::unordered_map<std::string, float> last_params_map;
+
+    std::unordered_map<std::string, float> materializeMap (const Eigen::VectorXf& vals) const
+    {
+        std::unordered_map<std::string, float> m;
+        const size_t n = std::min (param_names.size(), static_cast<size_t> (vals.size()));
+        for (size_t i = 0; i < n; ++i)
+        {
+            m.emplace (param_names[i], vals[static_cast<Eigen::Index> (i)]);
+        }
+        return m;
+    }
+};
 static float randUniform (float a, float b)
 {
     static thread_local std::mt19937 rng([]{
