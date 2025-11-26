@@ -31,8 +31,14 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 # ==============================================================================
 # Package Managers Setup
 # ==============================================================================
+# download CPM.cmake if missing
+file(DOWNLOAD
+    "https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.38.3/CPM.cmake"
+    "${CHROMAFLOW_CPM_CMAKE}"
+    TLS_VERIFY ON
+    SHOW_PROGRESS
+)
 
-# 1. CPM (CMake Package Manager) Setup
 include(cmake/CPM.cmake)
 
 # Download CPM if not available
