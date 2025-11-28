@@ -671,8 +671,8 @@ public:
             Eigen::VectorXf outv = output_mat.row(t).transpose();
             gradWo += gout * outv.transpose();
         }
-        // tiny direct update to keep stable
-        Wo -= 1e-6f * gradWo;
+        if (training_allowed)
+            Wo -= 1e-6f * gradWo;
 
         return {grad_prev, act_prev};
     }
@@ -704,6 +704,7 @@ public:
     const ChromaFlow::denseLayer* getQueryLayer() const { return queryLayer.get(); }
     const ChromaFlow::denseLayer* getKeyLayer() const { return keyLayer.get(); }
     const ChromaFlow::denseLayer* getValueLayer() const { return valueLayer.get(); }
+    void setTrainingAllowed(bool allowed) { training_allowed = allowed; }
 
 private:
     int heads;
@@ -722,6 +723,7 @@ private:
     std::unique_ptr<ChromaFlow::denseLayer> queryLayer;
     std::unique_ptr<ChromaFlow::denseLayer> keyLayer;
     std::unique_ptr<ChromaFlow::denseLayer> valueLayer;
+    bool training_allowed = false;
 
     static void initMatrix(Eigen::MatrixXf& M)
     {
