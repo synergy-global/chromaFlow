@@ -372,91 +372,170 @@ public:
         out.features = static_cast<int>(a.size());
         return out;
     }
-
     std::pair<FeatureTensor, FeatureTensor> backward(const FeatureTensor& grad_output)
     {
         FeatureTensor grad_prev;
         FeatureTensor act_prev;
 
+        // If no gradient came in, propagate zeros of the right shape
         if (grad_output.data.size() == 0) {
-            grad_prev.data = Eigen::MatrixXf::Zero(last_input_ema.size(), 1);
+            grad_prev.data       = Eigen::MatrixXf::Zero(last_input_ema.size(), 1);
             grad_prev.numSamples = static_cast<int>(last_input_ema.size());
-            grad_prev.features = 1;
-            act_prev.data = last_input_ema;
-            act_prev.numSamples = static_cast<int>(last_input_ema.size());
-            act_prev.features = 1;
-            return {grad_prev, act_prev};
+            grad_prev.features   = 1;
+
+            act_prev.data        = last_input_ema;
+            act_prev.numSamples  = static_cast<int>(last_input_ema.size());
+            act_prev.features    = 1;
+            return { grad_prev, act_prev };
         }
 
-        Eigen::VectorXf grad = grad_output.data.row(0).transpose(); // [output_size]
+        // -------------------------
+        // 1) Read grad_output as a 1D vector (row OR column)
+        // -------------------------
+        const int goRows = grad_output.data.rows();
+        const int goCols = grad_output.data.cols();
+        jassert(goRows == 1 || goCols == 1); // must be 1D
 
-        // activation derivative
-        Eigen::VectorXf dA(last_activation.size());
-        for (int i = 0; i < last_activation.size(); ++i)
+        Eigen::VectorXf grad;
+        if (goRows == 1) {
+            // 1×N -> N
+            grad = grad_output.data.row(0).transpose().eval();
+        } else {
+            // N×1 -> N
+            grad = grad_output.data.col(0).eval();
+        }
+
+        const int outDim = static_cast<int>(grad.size());
+
+        // -------------------------
+        // 2) Sanity-check all "output dim" vectors
+        // -------------------------
+        jassert(last_activation.size() == outDim);
+        jassert(last_postnorm.size()   == outDim);
+        jassert(last_preact.size()     == outDim);
+        if (use_layer_norm) {
+            jassert(last_xhat.size() == outDim);
+            jassert(gamma.size()    == outDim);
+        }
+        jassert(beta.size() == outDim);
+
+        // -------------------------
+        // 3) Activation derivative: dA
+        // -------------------------
+        Eigen::VectorXf dA(outDim);
+        for (int i = 0; i < outDim; ++i)
         {
-            float v = last_postnorm(i);
+            float v = last_postnorm(i); // value before nonlinearity
             switch (activation_type) {
-                case ActivationType::LeakyRelu: dA(i) = v >= 0.0f ? 1.0f : 0.01f; break;
-                case ActivationType::Tanh: dA(i) = 1.0f - std::tanh(v) * std::tanh(v); break;
+                case ActivationType::LeakyRelu:
+                    dA(i) = v >= 0.0f ? 1.0f : 0.01f;
+                    break;
+                case ActivationType::Tanh:
+                    dA(i) = 1.0f - std::tanh(v) * std::tanh(v);
+                    break;
                 case ActivationType::Sigmoid: {
                     float s = 1.0f / (1.0f + std::exp(-v));
-                    dA(i) = s * (1.0f - s); break;
+                    dA(i) = s * (1.0f - s);
+                    break;
                 }
-                case ActivationType::Linear: default: dA(i) = 1.0f; break;
+                case ActivationType::Linear:
+                default:
+                    dA(i) = 1.0f;
+                    break;
             }
         }
 
-        Eigen::VectorXf dPre = grad.cwiseProduct(dA); // dL/d(preact after LN or raw preact)
+        // dPre is dL/dz after (optional) LN
+        Eigen::VectorXf dPre = grad.cwiseProduct(dA).eval(); // [outDim]
 
+        // -------------------------
+        // 4) Layer norm backward (if enabled)
+        // -------------------------
         Eigen::VectorXf dgamma = Eigen::VectorXf::Zero(gamma.size());
-        Eigen::VectorXf dbeta = dPre;
-        Eigen::VectorXf dZ = dPre;
+        Eigen::VectorXf dbeta  = dPre;   // beta always matches output dim
+        Eigen::VectorXf dZ     = dPre;   // dL/d(pre-LN)
 
         if (use_layer_norm)
         {
+            // gamma, xhat already checked to be outDim long
             dgamma = dPre.cwiseProduct(last_xhat);
-            const float mean = last_preact.mean();
-            const float var = std::max(1e-6f, static_cast<float>((last_preact.array() - mean).square().mean()));
+
+            const float mean   = last_preact.mean();
+            const float var    = std::max(1e-6f,
+                                   static_cast<float>((last_preact.array() - mean)
+                                                      .square().mean()));
             const float invStd = 1.0f / std::sqrt(var);
-            Eigen::VectorXf xmu = last_preact.array() - mean;
+            const float Nf     = static_cast<float>(last_preact.size());
+
+            Eigen::VectorXf xmu   = last_preact.array() - mean;
             Eigen::VectorXf dxhat = dPre.cwiseProduct(gamma);
 
-            float sum_dxhat = dxhat.sum();
-            float sum_dxhat_xmu = (dxhat.cwiseProduct(xmu)).sum();
+            const float sum_dxhat     = dxhat.sum();
+            const float sum_dxhat_xmu = (dxhat.cwiseProduct(xmu)).sum();
 
-            Eigen::VectorXf dz = (dxhat.array() - sum_dxhat / last_preact.size() - xmu.array() * (sum_dxhat_xmu / (var * last_preact.size()))).matrix() * invStd;
-            dZ = dz;
+            Eigen::VectorXf dz =
+                (dxhat.array()
+                 - sum_dxhat / Nf
+                 - xmu.array() * (sum_dxhat_xmu / (var * Nf))).matrix() * invStd;
+
+            dZ = dz; // still [outDim]
         }
 
-        // gradient of weights
-        Eigen::MatrixXf dW = dZ * last_input_ema.transpose(); // [out x in]
+        // -------------------------
+        // 5) Gradients for weights and input
+        // -------------------------
+        const int inDim = static_cast<int>(last_input_ema.size());
 
-        // gradient w.r.t input for previous layer
+        jassert(weights.rows() == outDim);
+        jassert(weights.cols() == inDim);
+
+        // dW: [outDim x inDim]
+        Eigen::MatrixXf dW = dZ * last_input_ema.transpose();
+        jassert(dW.rows() == weights.rows());
+        jassert(dW.cols() == weights.cols());
+
+        // dInput: [inDim]
         Eigen::VectorXf dInput = weights.transpose() * dZ;
+        jassert(dInput.size() == inDim);
 
-        grad_prev.data = Eigen::MatrixXf::Zero(static_cast<Eigen::Index>(dInput.size()), 1);
-        grad_prev.data.col(0) = dInput;
-        grad_prev.numSamples = static_cast<int>(dInput.size());
-        grad_prev.features = 1;
+        // Pack grad_prev as (inDim x 1)
+        grad_prev.data          = Eigen::MatrixXf::Zero(inDim, 1);
+        grad_prev.data.col(0)   = dInput;
+        grad_prev.numSamples    = static_cast<int>(dInput.size());
+        grad_prev.features      = 1;
 
-        act_prev.data = last_input_ema;
-        act_prev.numSamples = static_cast<int>(last_input_ema.size());
-        act_prev.features = 1;
+        // act_prev is the EMA input to this dense layer
+        act_prev.data           = last_input_ema; // VectorXf -> Nx1
+        act_prev.numSamples     = static_cast<int>(last_input_ema.size());
+        act_prev.features       = 1;
 
-        // updates
-        optimizer.update(weights, -dW, grad_output);
-        optimizer.update(gamma, -dgamma, grad_output);
-        optimizer.update(beta, -dbeta, grad_output);
+        // -------------------------
+        // 6) Optimizer updates
+        // -------------------------
+        optimizer.update(weights, -dW,    grad_output);
+        if (gamma.size() == outDim) {
+            optimizer.update(gamma,   -dgamma, grad_output);
+        }
+        optimizer.update(beta,    -dbeta,  grad_output);
 
-        // approximate alpha update if external input stored
-        if (last_external_input.size() == learnable_alpha.size())
+        // Optional alpha update (if used)
+        if (last_external_input.size() == learnable_alpha.size()
+            && learnable_alpha.size() == inDim)
         {
-            Eigen::VectorXf error_signal_mu = last_external_input - last_input_ema;
-            Eigen::VectorXf d_alpha = (weights.transpose() * dZ).cwiseProduct(error_signal_mu).cwiseProduct(learnable_alpha.cwiseProduct(Eigen::VectorXf::Ones(learnable_alpha.size()) - learnable_alpha));
-            optimizer_alpha.update(learnable_alpha, -d_alpha, grad_output);
+            Eigen::VectorXf error_signal_mu =
+                last_external_input - last_input_ema; // [inDim]
+
+            Eigen::VectorXf d_alpha_raw =
+                (weights.transpose() * dZ)                 // [inDim]
+                .cwiseProduct(error_signal_mu)             // ∘
+                .cwiseProduct(learnable_alpha
+                              .cwiseProduct(Eigen::VectorXf::Ones(learnable_alpha.size())
+                                             - learnable_alpha)); // sigmoid-ish derivative
+
+            optimizer_alpha.update(learnable_alpha, -d_alpha_raw, grad_output);
         }
 
-        return {grad_prev, act_prev};
+        return { grad_prev, act_prev };
     }
 
     void learn (const FeatureTensor& gradient_from_output,
@@ -631,37 +710,104 @@ public:
         outFt.features = d_model;
         return outFt;
     }
-
-    // Backward: propagate gradient through Wo and approximate mapping to previous activation
     std::pair<FeatureTensor, FeatureTensor> backward(const FeatureTensor& grad_output)
     {
         FeatureTensor grad_prev;
         FeatureTensor act_prev;
 
-        if (grad_output.data.size() == 0) {
+        if (grad_output.data.size() == 0)
+        {
             grad_prev.data = Eigen::MatrixXf::Zero(last_input.rows(), last_input.cols());
             grad_prev.numSamples = last_input.rows();
-            grad_prev.features = last_input.cols();
+            grad_prev.features   = last_input.cols();
+
             act_prev.data = last_input;
             act_prev.numSamples = last_input.rows();
-            act_prev.features = last_input.cols();
-            return {grad_prev, act_prev};
+            act_prev.features   = last_input.cols();
+            return { grad_prev, act_prev };
         }
 
         const int seq_len = static_cast<int>(last_input.rows());
-        Eigen::MatrixXf dOutMat = grad_output.data * Wo; // [seq x d_model]
+        const int inDim   = static_cast<int>(last_input.cols());
+
+        // ==========================
+        // SINGLE-VECTOR CASE (your use case)
+        // ==========================
+        if (seq_len <= 1)
+        {
+            // grad_output is either 1×d_model or d_model×1
+            Eigen::VectorXf g;
+            if (grad_output.data.rows() == 1)
+                g = grad_output.data.row(0).transpose();
+            else
+                g = grad_output.data.col(0);
+
+            // Approximate mapping back to input:
+            // use average of query/key/value dense weights as a projection
+            Eigen::MatrixXf Wproj = Eigen::MatrixXf::Zero(d_model, inDim);
+            int count = 0;
+            if (queryLayer)
+            {
+                Wproj += queryLayer->getWeights(); // [d_model x inDim]
+                ++count;
+            }
+            if (keyLayer)
+            {
+                Wproj += keyLayer->getWeights();
+                ++count;
+            }
+            if (valueLayer)
+            {
+                Wproj += valueLayer->getWeights();
+                ++count;
+            }
+            if (count > 0)
+                Wproj /= (float)count;
+
+            // grad wrt input: [inDim] = [inDim x d_model] * [d_model]
+            Eigen::VectorXf gradInputVec = Wproj.transpose() * g;
+
+            grad_prev.data = Eigen::MatrixXf::Zero(inDim, 1);
+            grad_prev.data.col(0) = gradInputVec;
+            grad_prev.numSamples = inDim;
+            grad_prev.features   = 1;
+
+            act_prev.data = last_input;
+            act_prev.numSamples = last_input.rows();
+            act_prev.features   = last_input.cols();
+
+            // Optional: tiny Wo update using last_output_nonseq if sizes match
+            if (training_allowed && last_output_nonseq.size() == g.size())
+            {
+                Eigen::MatrixXf gradWo = g * last_output_nonseq.transpose(); // [d_model x d_model]
+                Wo -= 1e-6f * gradWo;
+            }
+
+            return { grad_prev, act_prev };
+        }
+
+        // ==========================
+        // SEQUENCE CASE (multi-row, multi-head)
+        // ==========================
+        const int d_model_local = d_model;
+
+        // Here we really expect [seq_len x d_model]
+        jassert(grad_output.data.rows() == seq_len);
+        jassert(grad_output.data.cols() == d_model_local);
+
+        Eigen::MatrixXf dOutMat = grad_output.data * Wo; // [seq_len x d_model]
 
         // conservative mapping back to input: use average transpose of Wq/Wk/Wv
         Eigen::MatrixXf Wavg = (Wq.transpose() + Wk.transpose() + Wv.transpose()) / 3.0f; // [input x d_model]
-        Eigen::MatrixXf gradInput = dOutMat * Wavg.transpose(); // [seq x input]
+        Eigen::MatrixXf gradInput = dOutMat * Wavg.transpose(); // [seq_len x input]
 
         grad_prev.data = gradInput;
-        grad_prev.numSamples = static_cast<int>(gradInput.rows());
-        grad_prev.features = static_cast<int>(gradInput.cols());
+        grad_prev.numSamples = seq_len;
+        grad_prev.features   = inDim;
 
         act_prev.data = last_input;
-        act_prev.numSamples = static_cast<int>(last_input.rows());
-        act_prev.features = static_cast<int>(last_input.cols());
+        act_prev.numSamples = seq_len;
+        act_prev.features   = inDim;
 
         // compute simple gradient for Wo: sum_t (grad_out_row outer output_mat_row)
         Eigen::MatrixXf gradWo = Eigen::MatrixXf::Zero(Wo.rows(), Wo.cols());
@@ -674,9 +820,8 @@ public:
         if (training_allowed)
             Wo -= 1e-6f * gradWo;
 
-        return {grad_prev, act_prev};
+        return { grad_prev, act_prev };
     }
-
     void learn (const FeatureTensor& gradient_from_output,
         const FeatureTensor& features_from_input,
         FeatureTensor& upstream_features) override
@@ -785,46 +930,75 @@ public:
         out.features = hidden_size;
         return out;
     }
-
     std::pair<FeatureTensor, FeatureTensor> backward(const FeatureTensor& grad_output)
     {
         FeatureTensor grad_prev, act_prev;
+
         if (grad_output.data.size() == 0) {
-            grad_prev.data = Eigen::MatrixXf::Zero(last_input.size(), 1);
+            grad_prev.data       = Eigen::MatrixXf::Zero(last_input.size(), 1);
             grad_prev.numSamples = static_cast<int>(last_input.size());
-            grad_prev.features = 1;
-            act_prev.data = last_input;
-            act_prev.numSamples = static_cast<int>(last_input.size());
-            act_prev.features = 1;
-            return {grad_prev, act_prev};
+            grad_prev.features   = 1;
+
+            act_prev.data        = last_input;
+            act_prev.numSamples  = static_cast<int>(last_input.size());
+            act_prev.features    = 1;
+            return { grad_prev, act_prev };
         }
 
-        Eigen::VectorXf grad = grad_output.data.row(0).transpose(); // [H]
-        Eigen::VectorXf dtanh = (1.0f - last_output_vec.array().square()).matrix();
-        Eigen::VectorXf dPre = grad.cwiseProduct(dtanh); // [H]
+        const int goRows = grad_output.data.rows();
+        const int goCols = grad_output.data.cols();
 
-        Eigen::MatrixXf grad_Wx = dPre * last_input.transpose(); // [H x I]
-        Eigen::MatrixXf grad_Wh = dPre * last_hidden_prev.transpose(); // [H x H]
-        Eigen::VectorXf grad_b = dPre;
+        // grad should match hidden_size in one dimension
+        Eigen::VectorXf grad;
+        if (goRows == 1 && goCols == hidden_size) {
+            // 1 x H
+            grad = grad_output.data.row(0).transpose();
+        } else if (goCols == 1 && goRows == hidden_size) {
+            // H x 1
+            grad = grad_output.data.col(0);
+        } else if (goRows == 1 || goCols == 1) {
+            // 1D but wrong length → try to salvage, but assert loudly
+            const int len = std::max(goRows, goCols);
+            jassert(len == hidden_size); // this should really match
+            if (goRows == 1)
+                grad = grad_output.data.row(0).transpose();
+            else
+                grad = grad_output.data.col(0);
+        } else {
+            // Not even 1D → something is wired wrong upstream
+            jassertfalse; // invalid gradient shape into RNNCell
+            grad = Eigen::VectorXf::Zero(hidden_size);
+        }
 
-        Eigen::VectorXf dInput = W_x.transpose() * dPre;
+        jassert(grad.size() == hidden_size);
+        jassert(last_output_vec.size() == hidden_size);
+
+        Eigen::VectorXf dtanh = (1.0f - last_output_vec.array().square()).matrix(); // [H]
+        Eigen::VectorXf dPre  = grad.cwiseProduct(dtanh);                            // [H]
+
+        // Gradients for parameters
+        Eigen::MatrixXf grad_Wx = dPre * last_input.transpose();        // [H x I]
+        Eigen::MatrixXf grad_Wh = dPre * last_hidden_prev.transpose();  // [H x H]
+        Eigen::VectorXf grad_b  = dPre;                                 // [H]
+
+        // Gradient w.r.t input
+        Eigen::VectorXf dInput = W_x.transpose() * dPre;                // [I]
 
         optimizer.update(W_x, -grad_Wx, grad_output);
         optimizer.update(W_h, -grad_Wh, grad_output);
-        optimizer.update(b, -grad_b, grad_output);
+        optimizer.update(b,   -grad_b,  grad_output);
 
-        grad_prev.data = Eigen::MatrixXf::Zero(static_cast<Eigen::Index>(dInput.size()), 1);
-        grad_prev.data.col(0) = dInput;
+        grad_prev.data       = Eigen::MatrixXf::Zero(static_cast<Eigen::Index>(dInput.size()), 1);
+        grad_prev.data.col(0)= dInput;
         grad_prev.numSamples = static_cast<int>(dInput.size());
-        grad_prev.features = 1;
+        grad_prev.features   = 1;
 
-        act_prev.data = last_input;
-        act_prev.numSamples = static_cast<int>(last_input.size());
-        act_prev.features = 1;
+        act_prev.data        = last_input;
+        act_prev.numSamples  = static_cast<int>(last_input.size());
+        act_prev.features    = 1;
 
-        return {grad_prev, act_prev};
+        return { grad_prev, act_prev };
     }
-
     void learn (const FeatureTensor& gradient_from_output,
         const FeatureTensor& features_from_input,
         FeatureTensor& upstream_features) override
@@ -894,3 +1068,4 @@ private:
 };
 
 } // namespace ChromaFlow
+
