@@ -152,6 +152,10 @@ file(GLOB_RECURSE CHROMAFLOW_HEADERS
 # Create header-only library
 add_library(ChromaFlow INTERFACE)
 
+add_custom_target(ChromaFlowHeaders SOURCES ${FUSION_DSP_HEADERS})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/chromaLIB FILES ${FUSION_DSP_HEADERS})
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+set_target_properties(ChromaFlowHeaders PROPERTIES FOLDER "ChromaFlow")
 # Add include directories
 target_include_directories(ChromaFlow INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

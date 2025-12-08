@@ -125,9 +125,7 @@ namespace ChromaFlow
     // UTILITY FUNCTIONS
     // ==============================================================================
 
-    class ChromaUtils
-    {
-    public:
+    
         // Local clamp for 0..1 range to avoid relying on std::clamp (C++17)
         static float clamp01(float v)
         {
@@ -291,7 +289,7 @@ namespace ChromaFlow
             float normalized = (std::log(safeFreq) - logMin) / logRange;
 
             // Clamp to 0..1 range
-            return ChromaUtils::clamp01(normalized);
+            return clamp01(normalized);
         }
 
         float mapUnitToTimeSamples(float unitValue, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
@@ -318,7 +316,7 @@ namespace ChromaFlow
             float normalized = (timeMS - minMS) / rangeMS;
 
             // Clamp to 0..1 range
-            return ChromaUtils::clamp01(normalized);
+            return clamp01(normalized);
         }
         float mapUnitToLinearRange(float unitValue, float minValue, float maxValue)
         {
@@ -338,7 +336,7 @@ namespace ChromaFlow
             float normalized = (value - minValue) / range;
 
             // Clamp to 0..1 range
-            return ChromaUtils::clamp01(normalized);
+            return clamp01(normalized);
         }
         float mapUnitToAmp(float unitValue, float minDB = -60.0f, float maxDB = 0.0f)
         {
@@ -365,7 +363,7 @@ namespace ChromaFlow
             float normalized = (dbValue - minDB) / dbRange;
 
             // Clamp to 0..1 range
-            return ChromaUtils::clamp01(normalized);
+            return clamp01(normalized);
         }
     };
 
@@ -433,6 +431,4 @@ public:
         const size_t stateVectors = isAdam ? 2 : 1;
         return totalParams * sampleTypeSize + totalParams * stateVectors * sampleTypeSize;
     }
-};
-
-} // namespace ChromaFlow
+}; // namespace ChromaFlow
