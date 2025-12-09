@@ -185,7 +185,7 @@ public:
         for (int i = 0; i < outN; ++i)
         {
             float v = outPtr[i] + b0;
-            outPtr[i] = ChromaFlow::ChromaUtils::clip(v, 0.0f, 1.0f);
+            outPtr[i] = ChromaUtils::clip(v, 0.0f, 1.0f);
         }
 
         last_output = output.data;

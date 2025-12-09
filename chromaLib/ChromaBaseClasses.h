@@ -124,8 +124,7 @@ namespace ChromaFlow
     // ==============================================================================
     // UTILITY FUNCTIONS
     // ==============================================================================
-
-    
+ 
         // Local clamp for 0..1 range to avoid relying on std::clamp (C++17)
         static float clamp01(float v)
         {
@@ -259,6 +258,18 @@ namespace ChromaFlow
 
             return m4 / (m2 * m2) - 3.0f;
         }
+        float msToUnit(float ms, float minMs, float maxMs, float curve = 1.0f)
+        {
+            ms = std::clamp(ms, minMs, maxMs);
+            float norm = (ms - minMs) / (maxMs - minMs);
+            return std::pow(norm, 1.0f / curve);
+        }
+        float unitToMs(float unit, float minMs, float maxMs, float curve = 1.0f)
+        {
+            unit = std::clamp(unit, 0.0f, 1.0f);
+            float shaped = std::pow(unit, curve);
+            return minMs + shaped * (maxMs - minMs);
+        }
 
         float mapUnitToLogFrequency(float unitValue, float minFreq = 20.0f, float maxFreq = 20000.0f)
         {
@@ -364,71 +375,79 @@ namespace ChromaFlow
 
             // Clamp to 0..1 range
             return clamp01(normalized);
-        }
-    };
+        } 
 
-/**
- * @brief Utility class for analyzing the size and memory footprint of 
- * the Neural Network architecture.
- */
-class NNAnalyzer {
-public:
     /**
-     * @brief Counts the total number of trainable parameters (weights and biases) 
-     * in a standard Dense or Conv layer setup.
-     * @param inputSize Number of input features/neurons.
-     * @param outputSize Number of output features/neurons.
-     * @param hasBias Flag if a bias vector is included.
-     * @return size_t Total number of trainable parameters (floats).
+     * @brief Utility class for analyzing the size and memory footprint of
+     * the Neural Network architecture.
      */
-    static size_t countTrainableParameters(size_t inputSize, size_t outputSize, bool hasBias) {
-        // Weights: inputSize * outputSize
-        // Biases: outputSize (if hasBias is true)
-        return (inputSize * outputSize) + (hasBias ? outputSize : 0);
-    }
-    
-    /**
-     * @brief Calculates the total memory footprint of the network in bytes, 
-     * including the optimizer state.
-     * * @param totalParameters The sum of all weights and biases (from countTrainableParameters).
-     * @param isAdam Flag indicating if the Adam optimizer (which has two state vectors) is used.
-     * @param sampleTypeSize Size of the numeric type (e.g., 4 for float, 8 for double).
-     * @return size_t Total estimated memory required in bytes.
-     * * Rationale: 
-     * - Base Memory: Total Parameters * Sample Type Size (e.g., float)
-     * - Optimizer State (Momentum/RMS): 
-     * - SGD with Momentum needs 1 state vector (Momentum).
-     * - Adam needs 2 state vectors (Momentum 'm' and Variance 'v').
-     */
-    static size_t calculateTotalMemory(size_t totalParameters, bool isAdam, size_t sampleTypeSize = 4) {
-        // 1. Memory for the parameters themselves (Weights & Biases)
-        size_t memoryForParams = totalParameters * sampleTypeSize;
-        
-        // 2. Memory for the Optimizer State (Momentum buffers)
-        // SGD (1 state vector: momentum) -> 1 * totalParameters
-        // Adam (2 state vectors: m and v) -> 2 * totalParameters
-        size_t stateVectors = isAdam ? 2 : 1;
-        size_t memoryForState = totalParameters * stateVectors * sampleTypeSize;
-        
-        // NOTE: This calculation is conservative and excludes feature/gradient buffers.
-        return memoryForParams + memoryForState;
-    }
-
-    // Aggregate parameter count across a set of modules
-    static size_t countTrainableParameters(const std::vector<std::shared_ptr<DifferentiableModule>>& modules) {
-        size_t total = 0;
-        for (const auto& m : modules) {
-            if (m) total += m->getNumParams();
+    class NNAnalyzer
+    {
+    public:
+        /**
+         * @brief Counts the total number of trainable parameters (weights and biases)
+         * in a standard Dense or Conv layer setup.
+         * @param inputSize Number of input features/neurons.
+         * @param outputSize Number of output features/neurons.
+         * @param hasBias Flag if a bias vector is included.
+         * @return size_t Total number of trainable parameters (floats).
+         */
+        static size_t countTrainableParameters(size_t inputSize, size_t outputSize, bool hasBias)
+        {
+            // Weights: inputSize * outputSize
+            // Biases: outputSize (if hasBias is true)
+            return (inputSize * outputSize) + (hasBias ? outputSize : 0);
         }
-        return total;
-    }
 
-    // Aggregate memory footprint across a set of modules
-    static size_t calculateTotalMemoryForModel(const std::vector<std::shared_ptr<DifferentiableModule>>& modules,
-                                               bool isAdam,
-                                               size_t sampleTypeSize = 4) {
-        const size_t totalParams = countTrainableParameters(modules);
-        const size_t stateVectors = isAdam ? 2 : 1;
-        return totalParams * sampleTypeSize + totalParams * stateVectors * sampleTypeSize;
-    }
-}; // namespace ChromaFlow
+        /**
+         * @brief Calculates the total memory footprint of the network in bytes,
+         * including the optimizer state.
+         * * @param totalParameters The sum of all weights and biases (from countTrainableParameters).
+         * @param isAdam Flag indicating if the Adam optimizer (which has two state vectors) is used.
+         * @param sampleTypeSize Size of the numeric type (e.g., 4 for float, 8 for double).
+         * @return size_t Total estimated memory required in bytes.
+         * * Rationale:
+         * - Base Memory: Total Parameters * Sample Type Size (e.g., float)
+         * - Optimizer State (Momentum/RMS):
+         * - SGD with Momentum needs 1 state vector (Momentum).
+         * - Adam needs 2 state vectors (Momentum 'm' and Variance 'v').
+         */
+        static size_t calculateTotalMemory(size_t totalParameters, bool isAdam, size_t sampleTypeSize = 4)
+        {
+            // 1. Memory for the parameters themselves (Weights & Biases)
+            size_t memoryForParams = totalParameters * sampleTypeSize;
+
+            // 2. Memory for the Optimizer State (Momentum buffers)
+            // SGD (1 state vector: momentum) -> 1 * totalParameters
+            // Adam (2 state vectors: m and v) -> 2 * totalParameters
+            size_t stateVectors = isAdam ? 2 : 1;
+            size_t memoryForState = totalParameters * stateVectors * sampleTypeSize;
+
+            // NOTE: This calculation is conservative and excludes feature/gradient buffers.
+            return memoryForParams + memoryForState;
+        }
+
+        // Aggregate parameter count across a set of modules
+        static size_t countTrainableParameters(const std::vector<std::shared_ptr<DifferentiableModule>> &modules)
+        {
+            size_t total = 0;
+            for (const auto &m : modules)
+            {
+                if (m)
+                    total += m->getNumParams();
+            }
+            return total;
+        }
+
+        // Aggregate memory footprint across a set of modules
+        static size_t calculateTotalMemoryForModel(const std::vector<std::shared_ptr<DifferentiableModule>> &modules,
+                                                   bool isAdam,
+                                                   size_t sampleTypeSize = 4)
+        {
+            const size_t totalParams = countTrainableParameters(modules);
+            const size_t stateVectors = isAdam ? 2 : 1;
+            return totalParams * sampleTypeSize + totalParams * stateVectors * sampleTypeSize;
+        }
+    }; // class NNAnalyzer
+
+} // namespace ChromaFlow

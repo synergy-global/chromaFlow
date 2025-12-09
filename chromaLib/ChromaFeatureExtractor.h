@@ -35,7 +35,7 @@ public:
     FeatureExtractor (int sampleRate,
                       int nFft = 512,
                       int numMfcc = 13,
-                      const std::vector<std::string>& features = {
+                      const std::vector<std::string>& featureNames = {
                           "mfcc",
                           "spectral_centroid",
                           "spectral_rolloff",
@@ -48,7 +48,7 @@ public:
           n_fft (std::max (8, nFft)),
           num_mfcc (std::max (1, numMfcc)),
           brightness_cutoff_hz (1500.0f),
-          requested (features.begin(), features.end()),
+          requested (featureNames.begin(), featureNames.end()),
           mel_n_mels (40)
     {
         // --- init FFT + static buffers (non-RT) ---
