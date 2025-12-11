@@ -134,6 +134,8 @@
         "ratio": "cpp",
         "regex": "cpp",
         "dense": "cpp",
-        "eigen": "cpp"
+        "eigen": "cpp",
+        "cstddef": "cpp",
+        "version": "cpp"
     }
 }

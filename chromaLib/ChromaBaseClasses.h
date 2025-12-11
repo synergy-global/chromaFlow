@@ -258,20 +258,19 @@ namespace ChromaFlow
 
             return m4 / (m2 * m2) - 3.0f;
         }
-        float msToUnit(float ms, float minMs, float maxMs, float curve = 1.0f)
+        inline float mapMsToUnit(float ms, float minMs, float maxMs, float curve = 1.0f)
         {
             ms = std::clamp(ms, minMs, maxMs);
             float norm = (ms - minMs) / (maxMs - minMs);
             return std::pow(norm, 1.0f / curve);
         }
-        float unitToMs(float unit, float minMs, float maxMs, float curve = 1.0f)
+        inline float mapUnitToMs(float unit, float minMs, float maxMs, float curve = 1.0f)
         {
             unit = std::clamp(unit, 0.0f, 1.0f);
             float shaped = std::pow(unit, curve);
             return minMs + shaped * (maxMs - minMs);
         }
-
-        float mapUnitToLogFrequency(float unitValue, float minFreq = 20.0f, float maxFreq = 20000.0f)
+        inline float mapUnitToLogFrequency(float unitValue, float minFreq = 20.0f, float maxFreq = 20000.0f)    
         {
             float input = std::max(0.0f, std::min(1.0f, unitValue));
 
@@ -285,7 +284,7 @@ namespace ChromaFlow
             // Convert back to linear space (the frequency in Hz)
             return std::exp(logOutput);
         }
-        float mapLogFrequencyToUnit(float freq, float minFreq = 20.0f, float maxFreq = 20000.0f)
+        inline float mapLogFrequencyToUnit(float freq, float minFreq = 20.0f, float maxFreq = 20000.0f)
         {
             float safeFreq = std::max(freq, minFreq); // Clamp for safety
 
@@ -303,7 +302,7 @@ namespace ChromaFlow
             return clamp01(normalized);
         }
 
-        float mapUnitToTimeSamples(float unitValue, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
+        inline float mapUnitToTimeSamples(float unitValue, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
         {
             float input = std::max(0.0f, std::min(1.0f, unitValue));
 
@@ -313,7 +312,7 @@ namespace ChromaFlow
             // 2. Convert MS to Samples: Samples = MS * (Fs / 1000)
             return timeMS * (sampleRate / 1000.0f);
         }
-        float mapTimeSamplesToUnit(float samples, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
+        inline float mapTimeSamplesToUnit(float samples, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
         {
             // 1. Convert Samples back to Milliseconds (MS)
             float timeMS = samples / (sampleRate / 1000.0f);
@@ -329,7 +328,7 @@ namespace ChromaFlow
             // Clamp to 0..1 range
             return clamp01(normalized);
         }
-        float mapUnitToLinearRange(float unitValue, float minValue, float maxValue)
+        inline float mapUnitToLinearRange(float unitValue, float minValue, float maxValue)
         {
             // Clamp the input unit value for safety
             float input = std::max(0.0f, std::min(1.0f, unitValue));
@@ -337,7 +336,7 @@ namespace ChromaFlow
             // Perform the linear mapping: Output = Min + (Input * Range)
             return minValue + (input * (maxValue - minValue));
         }
-        float mapLinearRangeToUnit(float value, float minValue, float maxValue)
+        inline float mapLinearRangeToUnit(float value, float minValue, float maxValue)
         {
             const float range = maxValue - minValue;
             if (range == 0.0f)
@@ -349,7 +348,7 @@ namespace ChromaFlow
             // Clamp to 0..1 range
             return clamp01(normalized);
         }
-        float mapUnitToAmp(float unitValue, float minDB = -60.0f, float maxDB = 0.0f)
+        inline float mapUnitToAmp(float unitValue, float minDB = -60.0f, float maxDB = 0.0f)
         {
             // 1. Map Unit Value to dB Scale (Linear interpolation in dB space)
             float input = std::max(0.0f, std::min(1.0f, unitValue));
@@ -360,7 +359,7 @@ namespace ChromaFlow
             // the previous clamp should suffice.
             return std::pow(10.0f, dbValue / 20.0f);
         }
-        float mapAmpToUnit(float amplitude, float minDB = -60.0f, float maxDB = 0.0f)
+        inline float mapAmpToUnit(float amplitude, float minDB = -60.0f, float maxDB = 0.0f)
         {
             // 1. Convert Linear Amplitude to dB: 20 * log10(Amp)
             // Use an anti-denormal guard (1e-6) for safety against log(0)
