@@ -275,6 +275,14 @@ public:
     const Eigen::VectorXf& getWeights() const { return kernel_; }
     const Eigen::VectorXf& getBiases() const { return biases_; }
 
+    // Add setters (inline or in .cpp)
+    void setWeights(const Eigen::MatrixXf& W) {
+        weights_ = W; // match shape checks if needed
+    }
+    void setBiases(const Eigen::VectorXf& B) {
+        biases_ = B;
+    }
+
     void reset() override { last_input.setZero(); last_output.setZero(); }
 
     size_t getNumParams() const override {
@@ -284,6 +292,7 @@ public:
 private:
     Eigen::VectorXf kernel_;
     Eigen::VectorXf biases_;
+    Eigen::MatrixXf weights_;
     int kernelSize_;
     Eigen::MatrixXf last_input;
     Eigen::VectorXf last_output;
