@@ -1,4 +1,3 @@
- 
 #pragma once
 #include "ChromaBaseClasses.h"
 #include "ChromaOptimizers.h"
@@ -12,12 +11,83 @@
 #include <optional>
 #include <algorithm>
 #include <cassert>
+#include <map>
+#include <cmath>
+#include <cstdint>
+
+#ifndef jassert
+#define jassert(x) assert(x)
+#define jassertfalse assert(false)
+#endif
+
+// ============================
+// Agent mode (forward-only)
+// ============================
+#ifndef CHROMAFLOW_AGENT_MODE
+#define CHROMAFLOW_AGENT_MODE 1
+#endif
 
 namespace ChromaUtils {
-    static float clip(float v, float minVal, float maxVal) {
-        return std::max(minVal, std::min(maxVal, v));
-    }
+
+static inline float clip(float v, float minVal, float maxVal) {
+    return std::max(minVal, std::min(maxVal, v));
 }
+static inline float clip01(float v) { return clip(v, 0.0f, 1.0f); }
+
+// Deterministic tiny RNG (no random_device)
+static inline uint32_t lcg(uint32_t& s) { s = 1664525u * s + 1013904223u; return s; }
+static inline float u01(uint32_t& s) { return (lcg(s) >> 8) * (1.0f / 16777216.0f); } // 24-bit
+static inline float randUniform(float a, float b)
+{
+    static thread_local uint32_t seed = 0xC0FFEEu;
+    return a + (b - a) * u01(seed);
+}
+
+// Stable 1st-order adaptation primitive (DSP-ish)
+struct IIRAdapt
+{
+    float mu   = 1e-4f;
+    float minV = -2.0f;
+    float maxV =  2.0f;
+
+    inline float step(float& p, float target)
+    {
+        p += mu * (target - p);
+        p = clip(p, minV, maxV);
+        return p;
+    }
+
+    inline void stepVec(Eigen::VectorXf& p, const Eigen::VectorXf& target)
+    {
+        const int n = std::min<int>(p.size(), target.size());
+        for (int i = 0; i < n; ++i)
+            step(p[i], target[i]);
+    }
+};
+
+// Streaming stats (bounded + stable)
+struct RunningStats
+{
+    float a    = 0.01f;
+    float mean = 0.0f;
+    float var  = 1.0f;
+
+    inline void reset(float mean0 = 0.0f, float var0 = 1.0f)
+    {
+        mean = mean0;
+        var  = var0;
+    }
+
+    inline void push(float x)
+    {
+        const float d = x - mean;
+        mean += a * d;
+        var  += a * (d * d - var);
+        var = std::max(var, 1e-8f);
+    }
+};
+
+} // namespace ChromaUtils
 
 namespace ChromaFlow
 {
@@ -32,7 +102,8 @@ enum class ActivationType {
 class Collaborator : public DifferentiableModule
 {
 public:
-    Collaborator (std::map<std::string, float> param_names_map, std::optional<std::unordered_set<std::string>> invert_names = std::nullopt)
+    Collaborator (std::map<std::string, float> param_names_map,
+                  std::optional<std::unordered_set<std::string>> invert_names = std::nullopt)
         : invert_user (invert_names.value_or(std::unordered_set<std::string>{}))
     {
         param_names.reserve (param_names_map.size());
@@ -72,9 +143,7 @@ public:
             float intent = 0.0f;
             auto it = user_params.data.find(name);
             if (it != user_params.data.end())
-            {
                 intent = std::fmin(1.0f, std::fmax(0.0f, it->second));
-            }
 
             float final_val;
             if (intent == 0.0f)
@@ -101,40 +170,18 @@ public:
 
     const std::unordered_map<std::string, float>& lastParams() const { return last_params_map; }
 
-    void reset() override
-    {
-        last_params_map.clear();
-    }
+    void reset() override { last_params_map.clear(); }
 
 private:
     std::vector<std::string> param_names;
     std::unordered_set<std::string> invert_user;
     std::unordered_map<std::string, float> last_params_map;
-
-    std::unordered_map<std::string, float> materializeMap (const Eigen::VectorXf& vals) const
-    {
-        std::unordered_map<std::string, float> m;
-        const size_t n = std::min (param_names.size(), static_cast<size_t> (vals.size()));
-        for (size_t i = 0; i < n; ++i)
-        {
-            m.emplace (param_names[i], vals[static_cast<Eigen::Index> (i)]);
-        }
-        return m;
-    }
 };
-static float randUniform (float a, float b)
-{
-    static thread_local std::mt19937 rng([]{
-        std::random_device rd;
-        return std::mt19937(rd());
-    }());
-    std::uniform_real_distribution<float> dist(a, b);
-    return dist(rng);
-}
 
-//
-// --- convolutionalLayer (1D) ---
-//
+// ============================================================================
+// convolutionalLayer (1D)
+// Agent-mode: adapt only small affine (gain/bias), keep kernel stable.
+// ============================================================================
 class convolutionalLayer : public DifferentiableModule
 {
 public:
@@ -144,6 +191,12 @@ public:
         kernelSize_ = std::max(1, kernelSize);
         kernel_.setZero(kernelSize_);
         biases_.setZero(1);
+
+        // agent coefficients
+        gain_ = 1.0f;
+        bias_affine_ = 0.0f;
+        inStats_.reset(0.0f, 1.0f);
+        outStats_.reset(0.0f, 1.0f);
     }
 
     FeatureTensor forward (const FeatureTensor& input) override
@@ -170,6 +223,11 @@ public:
 
         Eigen::VectorXf col = input.data.col(0);
         const float* dataPtr = col.data();
+
+        // stats (input)
+        for (int i = 0; i < inN; ++i)
+            inStats_.push(dataPtr[i]);
+
         Eigen::VectorXf kr = kernel.reverse();
         float* outPtr = output.data.data();
 
@@ -185,18 +243,23 @@ public:
         for (int i = 0; i < outN; ++i)
         {
             float v = outPtr[i] + b0;
-            outPtr[i] = ChromaUtils::clip(v, 0.0f, 1.0f);
+
+            // agent affine
+            v = v * gain_ + bias_affine_;
+
+            outPtr[i] = ChromaUtils::clip01(v);
+            outStats_.push(outPtr[i]);
         }
 
         last_output = output.data;
         return output;
     }
 
-    // Backprop: compute gradients wrt kernel and input; return pair<gradPrev, actPrev>
+    // Backprop retained (debug/tests). Not used in Agent Mode.
     std::pair<FeatureTensor, FeatureTensor> backward(const FeatureTensor& grad_out)
     {
-        FeatureTensor grad_prev; // gradient to previous layer (same shape as last_input)
-        FeatureTensor act_prev;  // activation of previous layer (last_input) as FeatureTensor
+        FeatureTensor grad_prev;
+        FeatureTensor act_prev;
 
         if (grad_out.data.size() == 0) {
             grad_prev.data = Eigen::MatrixXf::Zero(last_input.rows(), last_input.cols());
@@ -208,14 +271,19 @@ public:
             return {grad_prev, act_prev};
         }
 
-        Eigen::VectorXf g = grad_out.data.row(0).transpose(); // outN length
+        // FIX: read gradient as col OR row (outN×1 is typical)
+        Eigen::VectorXf g;
+        if (grad_out.data.rows() == 1)
+            g = grad_out.data.row(0).transpose();
+        else
+            g = grad_out.data.col(0);
+
         const int K = kernelSize_;
         const int inN = static_cast<int>(last_input.rows());
         const int outN = static_cast<int>(g.size());
         const int pad = K/2;
         const int validOut = std::max(0, inN - K + 1);
 
-        // grad kernel
         Eigen::VectorXf gradKernel = Eigen::VectorXf::Zero(K);
         Eigen::VectorXf inputCol = last_input.col(0);
         const float* dataPtr = inputCol.data();
@@ -227,7 +295,6 @@ public:
             gradKernel += go * segMap.reverse();
         }
 
-        // grad input (convolve grad_out with kernel)
         Eigen::VectorXf gradInputVec = Eigen::VectorXf::Zero(inN);
         Eigen::VectorXf kr = kernel_.reverse();
         for (int i = 0; i < validOut; ++i)
@@ -235,12 +302,9 @@ public:
             float go = g[i + pad];
             if (go == 0.f) continue;
             for (int k = 0; k < K; ++k)
-            {
                 gradInputVec[i + k] += go * kr(k);
-            }
         }
 
-        // prepare FeatureTensor outputs
         grad_prev.data = Eigen::MatrixXf::Zero(inN, 1);
         grad_prev.data.col(0) = gradInputVec;
         grad_prev.numSamples = inN;
@@ -250,24 +314,47 @@ public:
         act_prev.numSamples = last_input.rows();
         act_prev.features = last_input.cols();
 
-        // optimizer update (use your optimizer)
-        Eigen::VectorXf negGrad = -gradKernel; // negative as optimizer expects gradient sign convention
+#if !CHROMAFLOW_AGENT_MODE
+        // classic optimizer update
+        Eigen::VectorXf negGrad = -gradKernel;
         optimizer.update(kernel_, negGrad, grad_prev);
 
         Eigen::VectorXf gradB(1);
         gradB(0) = g.sum();
         optimizer.update(biases_, -gradB, grad_prev);
-
+#else
+        (void)outN;
+#endif
         return {grad_prev, act_prev};
     }
 
+    // Agent learning: explicit feedback = slow adaptation of gain/bias only
     void learn (const FeatureTensor& gradient_from_output,
-        const FeatureTensor& features_from_input,
-        FeatureTensor& upstream_features) override
+                const FeatureTensor& features_from_input,
+                FeatureTensor& upstream_features) override
     {
-        (void) features_from_input;
-        (void) upstream_features;
-        backward(gradient_from_output);
+        (void)gradient_from_output;
+        (void)features_from_input;
+        (void)upstream_features;
+
+        // Homeostasis: match output mean to input mean (both typically in [0,1])
+        const float targetMean = ChromaUtils::clip(inStats_.mean, 0.0f, 1.0f);
+
+        // Bias corrects mean
+        adapt_.mu = 1e-4f;
+        adapt_.minV = -1.0f;
+        adapt_.maxV =  1.0f;
+        adapt_.step(bias_affine_, bias_affine_ + (targetMean - outStats_.mean));
+
+        // Gain corrects variance (match std)
+        const float inStd  = std::sqrt(inStats_.var);
+        const float outStd = std::sqrt(outStats_.var);
+        const float ratio  = (inStd + 1e-6f) / (outStd + 1e-6f);
+
+        adapt_.mu = 5e-5f;
+        adapt_.minV = 0.05f;
+        adapt_.maxV = 5.0f;
+        adapt_.step(gain_, gain_ * ratio);
     }
 
     void setKernel(const Eigen::VectorXf& k) { kernel_ = k; kernelSize_ = static_cast<int>(k.size()); }
@@ -275,42 +362,52 @@ public:
     const Eigen::VectorXf& getWeights() const { return kernel_; }
     const Eigen::VectorXf& getBiases() const { return biases_; }
 
-    // Add setters (inline or in .cpp)
-    void setWeights(const Eigen::MatrixXf& W) {
-        weights_ = W; // match shape checks if needed
+    void reset() override
+    {
+        last_input.setZero();
+        last_output.setZero();
+        inStats_.reset(0.0f, 1.0f);
+        outStats_.reset(0.0f, 1.0f);
+        gain_ = 1.0f;
+        bias_affine_ = 0.0f;
     }
-    void setBiases(const Eigen::VectorXf& B) {
-        biases_ = B;
-    }
-
-    void reset() override { last_input.setZero(); last_output.setZero(); }
 
     size_t getNumParams() const override {
-        return static_cast<size_t>(kernel_.size()) + static_cast<size_t>(biases_.size());
+        // kernel + biases + agent affine
+        return static_cast<size_t>(kernel_.size()) + static_cast<size_t>(biases_.size()) + 2u;
     }
 
 private:
     Eigen::VectorXf kernel_;
     Eigen::VectorXf biases_;
-    Eigen::MatrixXf weights_;
-    int kernelSize_;
+    int kernelSize_ = 1;
+
     Eigen::MatrixXf last_input;
     Eigen::VectorXf last_output;
+
+    // agent coeffs + stats
+    float gain_ = 1.0f;
+    float bias_affine_ = 0.0f;
+    ChromaUtils::IIRAdapt adapt_;
+    ChromaUtils::RunningStats inStats_;
+    ChromaUtils::RunningStats outStats_;
+
     SGDWithMomentum optimizer;
 };
 
-//
-// --- denseLayer ---
-//
+// ============================================================================
+// denseLayer
+// Agent-mode: freeze weights, adapt only gamma/beta (+ alpha optionally but slow)
+// ============================================================================
 class denseLayer : public DifferentiableModule
 {
 public:
     denseLayer (int inputSize,
-        int outputSize,
-        ActivationType activation = ActivationType::LeakyRelu,
-        bool useLayerNorm = true,
-        float learningRate = 0.005f,
-        float momentum = 0.9f)
+                int outputSize,
+                ActivationType activation = ActivationType::LeakyRelu,
+                bool useLayerNorm = true,
+                float learningRate = 0.005f,
+                float momentum = 0.9f)
         : input_size (inputSize),
           output_size (outputSize),
           activation_type (activation),
@@ -324,9 +421,13 @@ public:
         weights.resize (outputSize, inputSize);
         for (int o = 0; o < output_size; ++o)
             for (int i = 0; i < input_size; ++i)
-                weights (o, i) = randUniform (-limit, limit);
+                weights (o, i) = ChromaUtils::randUniform (-limit, limit);
+
         input_ema_state.setZero(input_size);
         learnable_alpha.setConstant(input_size, 0.5f);
+
+        outMean_.reset(0.0f, 1.0f);
+        outVar_.reset(0.0f, 1.0f);
     }
 
     FeatureTensor forward (const FeatureTensor& upstream_features) override
@@ -334,6 +435,7 @@ public:
         const int cols = static_cast<int>(upstream_features.data.cols());
         Eigen::VectorXf x(input_size);
         x.setZero();
+
         if (upstream_features.data.rows() > 0)
         {
             int available = std::min(cols, input_size);
@@ -360,6 +462,11 @@ public:
             last_xhat = norm;
             z = (gamma.cwiseProduct (norm) + beta).eval();
         }
+        else
+        {
+            // always apply beta even if LN disabled (acts as bias)
+            z = z + beta;
+        }
 
         last_postnorm = z;
 
@@ -374,6 +481,14 @@ public:
 
         last_activation = a;
 
+        // stats for agent learning
+        {
+            const float m = a.mean();
+            const float vv = static_cast<float>((a.array() - m).square().mean());
+            outMean_.push(m);
+            outVar_.push(vv);
+        }
+
         FeatureTensor out;
         out.data.resize(1, static_cast<Eigen::Index>(a.size()));
         out.data.row(0) = a.transpose();
@@ -381,12 +496,13 @@ public:
         out.features = static_cast<int>(a.size());
         return out;
     }
+
+    // Backprop retained (debug/tests). Not used for production agent learning.
     std::pair<FeatureTensor, FeatureTensor> backward(const FeatureTensor& grad_output)
     {
         FeatureTensor grad_prev;
         FeatureTensor act_prev;
 
-        // If no gradient came in, propagate zeros of the right shape
         if (grad_output.data.size() == 0) {
             grad_prev.data       = Eigen::MatrixXf::Zero(last_input_ema.size(), 1);
             grad_prev.numSamples = static_cast<int>(last_input_ema.size());
@@ -398,27 +514,16 @@ public:
             return { grad_prev, act_prev };
         }
 
-        // -------------------------
-        // 1) Read grad_output as a 1D vector (row OR column)
-        // -------------------------
         const int goRows = grad_output.data.rows();
         const int goCols = grad_output.data.cols();
-        jassert(goRows == 1 || goCols == 1); // must be 1D
+        jassert(goRows == 1 || goCols == 1);
 
         Eigen::VectorXf grad;
-        if (goRows == 1) {
-            // 1×N -> N
-            grad = grad_output.data.row(0).transpose().eval();
-        } else {
-            // N×1 -> N
-            grad = grad_output.data.col(0).eval();
-        }
+        if (goRows == 1) grad = grad_output.data.row(0).transpose().eval();
+        else            grad = grad_output.data.col(0).eval();
 
         const int outDim = static_cast<int>(grad.size());
 
-        // -------------------------
-        // 2) Sanity-check all "output dim" vectors
-        // -------------------------
         jassert(last_activation.size() == outDim);
         jassert(last_postnorm.size()   == outDim);
         jassert(last_preact.size()     == outDim);
@@ -428,45 +533,31 @@ public:
         }
         jassert(beta.size() == outDim);
 
-        // -------------------------
-        // 3) Activation derivative: dA
-        // -------------------------
         Eigen::VectorXf dA(outDim);
         for (int i = 0; i < outDim; ++i)
         {
-            float v = last_postnorm(i); // value before nonlinearity
+            float v = last_postnorm(i);
             switch (activation_type) {
-                case ActivationType::LeakyRelu:
-                    dA(i) = v >= 0.0f ? 1.0f : 0.01f;
-                    break;
-                case ActivationType::Tanh:
-                    dA(i) = 1.0f - std::tanh(v) * std::tanh(v);
-                    break;
+                case ActivationType::LeakyRelu: dA(i) = v >= 0.0f ? 1.0f : 0.01f; break;
+                case ActivationType::Tanh:     dA(i) = 1.0f - std::tanh(v) * std::tanh(v); break;
                 case ActivationType::Sigmoid: {
                     float s = 1.0f / (1.0f + std::exp(-v));
                     dA(i) = s * (1.0f - s);
                     break;
                 }
                 case ActivationType::Linear:
-                default:
-                    dA(i) = 1.0f;
-                    break;
+                default: dA(i) = 1.0f; break;
             }
         }
 
-        // dPre is dL/dz after (optional) LN
-        Eigen::VectorXf dPre = grad.cwiseProduct(dA).eval(); // [outDim]
+        Eigen::VectorXf dPre = grad.cwiseProduct(dA).eval();
 
-        // -------------------------
-        // 4) Layer norm backward (if enabled)
-        // -------------------------
         Eigen::VectorXf dgamma = Eigen::VectorXf::Zero(gamma.size());
-        Eigen::VectorXf dbeta  = dPre;   // beta always matches output dim
-        Eigen::VectorXf dZ     = dPre;   // dL/d(pre-LN)
+        Eigen::VectorXf dbeta  = dPre;
+        Eigen::VectorXf dZ     = dPre;
 
         if (use_layer_norm)
         {
-            // gamma, xhat already checked to be outDim long
             dgamma = dPre.cwiseProduct(last_xhat);
 
             const float mean   = last_preact.mean();
@@ -487,73 +578,81 @@ public:
                  - sum_dxhat / Nf
                  - xmu.array() * (sum_dxhat_xmu / (var * Nf))).matrix() * invStd;
 
-            dZ = dz; // still [outDim]
+            dZ = dz;
         }
 
-        // -------------------------
-        // 5) Gradients for weights and input
-        // -------------------------
         const int inDim = static_cast<int>(last_input_ema.size());
-
         jassert(weights.rows() == outDim);
         jassert(weights.cols() == inDim);
 
-        // dW: [outDim x inDim]
         Eigen::MatrixXf dW = dZ * last_input_ema.transpose();
-        jassert(dW.rows() == weights.rows());
-        jassert(dW.cols() == weights.cols());
-
-        // dInput: [inDim]
         Eigen::VectorXf dInput = weights.transpose() * dZ;
-        jassert(dInput.size() == inDim);
 
-        // Pack grad_prev as (inDim x 1)
         grad_prev.data          = Eigen::MatrixXf::Zero(inDim, 1);
         grad_prev.data.col(0)   = dInput;
         grad_prev.numSamples    = static_cast<int>(dInput.size());
         grad_prev.features      = 1;
 
-        // act_prev is the EMA input to this dense layer
-        act_prev.data           = last_input_ema; // VectorXf -> Nx1
+        act_prev.data           = last_input_ema;
         act_prev.numSamples     = static_cast<int>(last_input_ema.size());
         act_prev.features       = 1;
 
-        // -------------------------
-        // 6) Optimizer updates
-        // -------------------------
+#if !CHROMAFLOW_AGENT_MODE
         optimizer.update(weights, -dW,    grad_output);
-        if (gamma.size() == outDim) {
-            optimizer.update(gamma,   -dgamma, grad_output);
-        }
+        if (gamma.size() == outDim) optimizer.update(gamma,   -dgamma, grad_output);
         optimizer.update(beta,    -dbeta,  grad_output);
 
-        // Optional alpha update (if used)
         if (last_external_input.size() == learnable_alpha.size()
             && learnable_alpha.size() == inDim)
         {
-            Eigen::VectorXf error_signal_mu =
-                last_external_input - last_input_ema; // [inDim]
+            Eigen::VectorXf error_signal_mu = last_external_input - last_input_ema;
 
             Eigen::VectorXf d_alpha_raw =
-                (weights.transpose() * dZ)                 // [inDim]
-                .cwiseProduct(error_signal_mu)             // ∘
+                (weights.transpose() * dZ)
+                .cwiseProduct(error_signal_mu)
                 .cwiseProduct(learnable_alpha
                               .cwiseProduct(Eigen::VectorXf::Ones(learnable_alpha.size())
-                                             - learnable_alpha)); // sigmoid-ish derivative
+                                             - learnable_alpha));
 
             optimizer_alpha.update(learnable_alpha, -d_alpha_raw, grad_output);
         }
+#endif
 
         return { grad_prev, act_prev };
     }
 
+    // Agent learning: explicit feedback on a *small* set (gamma/beta [+alpha optional])
     void learn (const FeatureTensor& gradient_from_output,
-        const FeatureTensor& features_from_input,
-        FeatureTensor& upstream_features) override
+                const FeatureTensor& features_from_input,
+                FeatureTensor& upstream_features) override
     {
-        (void) features_from_input;
-        (void) upstream_features;
-        backward(gradient_from_output);
+        (void)gradient_from_output;
+        (void)features_from_input;
+        (void)upstream_features;
+
+        // Target an activation distribution (neutral + bounded)
+        const float targetMean = 0.0f;
+        const float targetVar  = 0.25f; // std 0.5
+
+        // beta corrects mean
+        adapt_.mu = 1e-4f;
+        adapt_.minV = -2.0f; adapt_.maxV = 2.0f;
+        const float meanErr = (targetMean - outMean_.mean);
+        for (int i = 0; i < beta.size(); ++i)
+            adapt_.step(beta[i], beta[i] + meanErr);
+
+        // gamma corrects variance (scale)
+        const float ratio = std::sqrt((targetVar + 1e-6f) / (outVar_.mean + 1e-6f));
+        adapt_.mu = 5e-5f;
+        adapt_.minV = 0.05f; adapt_.maxV = 5.0f;
+        for (int i = 0; i < gamma.size(); ++i)
+            adapt_.step(gamma[i], gamma[i] * ratio);
+
+        // alpha: VERY slow drift toward 0.5 (keeps EMA stable)
+        adaptAlpha_.mu = 1e-6f;
+        adaptAlpha_.minV = 0.001f; adaptAlpha_.maxV = 0.999f;
+        for (int i = 0; i < learnable_alpha.size(); ++i)
+            adaptAlpha_.step(learnable_alpha[i], 0.5f);
     }
 
     const Eigen::MatrixXf& getWeights() const { return weights; }
@@ -566,7 +665,18 @@ public:
     void setBeta(const Eigen::VectorXf& B) { beta = B; }
     void setAlpha(const Eigen::VectorXf& A) { learnable_alpha = A; }
 
-    void reset() override { input_ema_state.setZero(); last_input_ema.setZero(); last_preact.setZero(); last_postnorm.setZero(); last_activation.setZero(); last_xhat.setZero(); last_external_input.setZero(); }
+    void reset() override
+    {
+        input_ema_state.setZero();
+        last_input_ema.setZero();
+        last_preact.setZero();
+        last_postnorm.setZero();
+        last_activation.setZero();
+        last_xhat.setZero();
+        last_external_input.setZero();
+        outMean_.reset(0.0f, 1.0f);
+        outVar_.reset(0.0f, 1.0f);
+    }
 
     size_t getNumParams() const override {
         const size_t w = static_cast<size_t>(weights.rows()) * static_cast<size_t>(weights.cols());
@@ -583,35 +693,41 @@ private:
     bool use_layer_norm;
 
     Eigen::MatrixXf weights; // [output_size][input_size]
-    Eigen::VectorXf gamma; // Layer Norm Scale 
-    Eigen::VectorXf beta;  // Layer Norm Shift (Fused Bias)
+    Eigen::VectorXf gamma;   // LN scale
+    Eigen::VectorXf beta;    // LN shift (and bias if LN off)
 
-    Eigen::VectorXf input_ema_state; // Learnable Statistical Context (mu_t-1)
-    Eigen::VectorXf learnable_alpha; // Trainable EMA decay rate (A_raw)
+    Eigen::VectorXf input_ema_state;
+    Eigen::VectorXf learnable_alpha;
 
-    // cached for backward
     Eigen::VectorXf last_input_ema;
     Eigen::VectorXf last_preact;
     Eigen::VectorXf last_postnorm;
     Eigen::VectorXf last_xhat;
     Eigen::VectorXf last_activation;
-    Eigen::VectorXf last_external_input; // optional, if forward records raw external input
+    Eigen::VectorXf last_external_input;
+
+    // agent stats + adapt
+    ChromaUtils::RunningStats outMean_;
+    ChromaUtils::RunningStats outVar_;
+    ChromaUtils::IIRAdapt adapt_;
+    ChromaUtils::IIRAdapt adaptAlpha_;
 
     SGDWithMomentum optimizer;
-    SGDWithMomentum optimizer_alpha; 
+    SGDWithMomentum optimizer_alpha;
 };
 
-//
-// --- attentionLayer (conservative, stable backward) ---
-//
+// ============================================================================
+// attentionLayer
+// Agent-mode: keep projections stable, adapt only small output affine.
+// ============================================================================
 class attentionLayer : public DifferentiableModule
 {
 public:
     attentionLayer (int inputSize,
-        int outputSize,
-        int numHeads = 4,
-        ActivationType activationType = ActivationType::Linear,
-        bool useLayerNorm = true)
+                    int outputSize,
+                    int numHeads = 4,
+                    ActivationType activationType = ActivationType::Linear,
+                    bool useLayerNorm = true)
         : heads(numHeads), d_model(outputSize), d_k(outputSize / numHeads)
     {
         assert(outputSize % numHeads == 0);
@@ -626,14 +742,20 @@ public:
         initMatrix(Wo);
 
         queryLayer = std::make_unique<ChromaFlow::denseLayer> (inputSize, outputSize, activationType, useLayerNorm, 0.0005f, 0.01f);
-        keyLayer = std::make_unique<ChromaFlow::denseLayer> (inputSize, outputSize, activationType, useLayerNorm, 0.0005f, 0.01f);
+        keyLayer   = std::make_unique<ChromaFlow::denseLayer> (inputSize, outputSize, activationType, useLayerNorm, 0.0005f, 0.01f);
         valueLayer = std::make_unique<ChromaFlow::denseLayer> (inputSize, outputSize, activationType, useLayerNorm, 0.0005f, 0.01f);
+
+        out_gain = Eigen::VectorXf::Ones(outputSize);
+        out_bias = Eigen::VectorXf::Zero(outputSize);
+        outMean_.reset(0.0f, 1.0f);
+        outVar_.reset(0.0f, 1.0f);
     }
 
     FeatureTensor forward (const FeatureTensor& input) override
     {
         last_input = input.data;
 
+        // single-vector case
         if (input.data.rows() <= 1)
         {
             FeatureTensor qT = queryLayer->forward(input);
@@ -647,14 +769,24 @@ public:
             Eigen::VectorXf scores = (q.array() * k.array()) / std::sqrt((float)std::max(1, (int)q.size()));
             Eigen::VectorXf expS = (scores.array() - scores.maxCoeff()).exp().matrix();
             const float denom = expS.sum();
+
             Eigen::VectorXf att;
-            if (denom > 0.0f)
-                att = (expS.array() / denom).matrix();
-            else
-                // Fallback to uniform distribution to avoid zeroing output
-                att = Eigen::VectorXf::Constant(expS.size(), 1.0f / std::max(1, (int)expS.size()));
+            if (denom > 0.0f) att = (expS.array() / denom).matrix();
+            else              att = Eigen::VectorXf::Constant(expS.size(), 1.0f / std::max(1, (int)expS.size()));
+
             Eigen::VectorXf res = att.cwiseProduct(v);
+
+            // agent affine (small coeff set)
+            res = res.cwiseProduct(out_gain) + out_bias;
+
+            // stats
+            const float m  = res.mean();
+            const float vv = static_cast<float>((res.array() - m).square().mean());
+            outMean_.push(m);
+            outVar_.push(vv);
+
             last_output_nonseq = res;
+
             FeatureTensor out;
             out.data.resize(1, static_cast<Eigen::Index>(res.size()));
             out.data.row(0) = res.transpose();
@@ -663,8 +795,10 @@ public:
             return out;
         }
 
+        // sequence case (kept, but not your primary use case)
         const int seq_len = static_cast<int>(input.data.rows());
         const int d_in = static_cast<int>(input.data.cols());
+        (void)d_in;
 
         Q = Eigen::MatrixXf(seq_len, d_model);
         K = Eigen::MatrixXf(seq_len, d_model);
@@ -712,13 +846,20 @@ public:
             final_out.row(t) = (Wo * outRow).transpose();
         }
 
+        // apply agent affine per timestep
+        for (int t = 0; t < seq_len; ++t)
+            final_out.row(t) = (final_out.row(t).transpose().cwiseProduct(out_gain) + out_bias).transpose();
+
         last_output_vec = final_out;
+
         FeatureTensor outFt;
         outFt.data = final_out;
         outFt.numSamples = seq_len;
         outFt.features = d_model;
         return outFt;
     }
+
+    // Backprop retained (debug/tests). In agent mode we do not update big matrices.
     std::pair<FeatureTensor, FeatureTensor> backward(const FeatureTensor& grad_output)
     {
         FeatureTensor grad_prev;
@@ -739,41 +880,19 @@ public:
         const int seq_len = static_cast<int>(last_input.rows());
         const int inDim   = static_cast<int>(last_input.cols());
 
-        // ==========================
-        // SINGLE-VECTOR CASE (your use case)
-        // ==========================
         if (seq_len <= 1)
         {
-            // grad_output is either 1×d_model or d_model×1
             Eigen::VectorXf g;
-            if (grad_output.data.rows() == 1)
-                g = grad_output.data.row(0).transpose();
-            else
-                g = grad_output.data.col(0);
+            if (grad_output.data.rows() == 1) g = grad_output.data.row(0).transpose();
+            else                              g = grad_output.data.col(0);
 
-            // Approximate mapping back to input:
-            // use average of query/key/value dense weights as a projection
             Eigen::MatrixXf Wproj = Eigen::MatrixXf::Zero(d_model, inDim);
             int count = 0;
-            if (queryLayer)
-            {
-                Wproj += queryLayer->getWeights(); // [d_model x inDim]
-                ++count;
-            }
-            if (keyLayer)
-            {
-                Wproj += keyLayer->getWeights();
-                ++count;
-            }
-            if (valueLayer)
-            {
-                Wproj += valueLayer->getWeights();
-                ++count;
-            }
-            if (count > 0)
-                Wproj /= (float)count;
+            if (queryLayer) { Wproj += queryLayer->getWeights(); ++count; }
+            if (keyLayer)   { Wproj += keyLayer->getWeights();   ++count; }
+            if (valueLayer) { Wproj += valueLayer->getWeights(); ++count; }
+            if (count > 0) Wproj /= (float)count;
 
-            // grad wrt input: [inDim] = [inDim x d_model] * [d_model]
             Eigen::VectorXf gradInputVec = Wproj.transpose() * g;
 
             grad_prev.data = Eigen::MatrixXf::Zero(inDim, 1);
@@ -785,30 +904,24 @@ public:
             act_prev.numSamples = last_input.rows();
             act_prev.features   = last_input.cols();
 
-            // Optional: tiny Wo update using last_output_nonseq if sizes match
+#if !CHROMAFLOW_AGENT_MODE
             if (training_allowed && last_output_nonseq.size() == g.size())
             {
-                Eigen::MatrixXf gradWo = g * last_output_nonseq.transpose(); // [d_model x d_model]
+                Eigen::MatrixXf gradWo = g * last_output_nonseq.transpose();
                 Wo -= 1e-6f * gradWo;
             }
-
+#endif
             return { grad_prev, act_prev };
         }
 
-        // ==========================
-        // SEQUENCE CASE (multi-row, multi-head)
-        // ==========================
         const int d_model_local = d_model;
-
-        // Here we really expect [seq_len x d_model]
         jassert(grad_output.data.rows() == seq_len);
         jassert(grad_output.data.cols() == d_model_local);
 
-        Eigen::MatrixXf dOutMat = grad_output.data * Wo; // [seq_len x d_model]
+        Eigen::MatrixXf dOutMat = grad_output.data * Wo;
 
-        // conservative mapping back to input: use average transpose of Wq/Wk/Wv
-        Eigen::MatrixXf Wavg = (Wq.transpose() + Wk.transpose() + Wv.transpose()) / 3.0f; // [input x d_model]
-        Eigen::MatrixXf gradInput = dOutMat * Wavg.transpose(); // [seq_len x input]
+        Eigen::MatrixXf Wavg = (Wq.transpose() + Wk.transpose() + Wv.transpose()) / 3.0f;
+        Eigen::MatrixXf gradInput = dOutMat * Wavg.transpose();
 
         grad_prev.data = gradInput;
         grad_prev.numSamples = seq_len;
@@ -818,7 +931,7 @@ public:
         act_prev.numSamples = seq_len;
         act_prev.features   = inDim;
 
-        // compute simple gradient for Wo: sum_t (grad_out_row outer output_mat_row)
+#if !CHROMAFLOW_AGENT_MODE
         Eigen::MatrixXf gradWo = Eigen::MatrixXf::Zero(Wo.rows(), Wo.cols());
         for (int t = 0; t < seq_len; ++t)
         {
@@ -826,18 +939,37 @@ public:
             Eigen::VectorXf outv = output_mat.row(t).transpose();
             gradWo += gout * outv.transpose();
         }
-        if (training_allowed)
-            Wo -= 1e-6f * gradWo;
+        if (training_allowed) Wo -= 1e-6f * gradWo;
+#endif
 
         return { grad_prev, act_prev };
     }
+
+    // Agent learning: adapt only out_gain/out_bias (small coefficient set)
     void learn (const FeatureTensor& gradient_from_output,
-        const FeatureTensor& features_from_input,
-        FeatureTensor& upstream_features) override
+                const FeatureTensor& features_from_input,
+                FeatureTensor& upstream_features) override
     {
-        (void) features_from_input;
-        (void) upstream_features;
-        backward(gradient_from_output);
+        (void)gradient_from_output;
+        (void)features_from_input;
+        (void)upstream_features;
+
+        const float targetMean = 0.0f;
+        const float targetVar  = 0.25f;
+
+        // bias corrects mean
+        adapt_.mu = 1e-4f;
+        adapt_.minV = -2.0f; adapt_.maxV = 2.0f;
+        const float meanErr = (targetMean - outMean_.mean);
+        for (int i = 0; i < out_bias.size(); ++i)
+            adapt_.step(out_bias[i], out_bias[i] + meanErr);
+
+        // gain corrects variance
+        const float ratio = std::sqrt((targetVar + 1e-6f) / (outVar_.mean + 1e-6f));
+        adapt_.mu = 5e-5f;
+        adapt_.minV = 0.05f; adapt_.maxV = 5.0f;
+        for (int i = 0; i < out_gain.size(); ++i)
+            adapt_.step(out_gain[i], out_gain[i] * ratio);
     }
 
     void reset() override
@@ -845,13 +977,20 @@ public:
         last_input.setZero();
         Q.setZero(); K.setZero(); V.setZero();
         output_mat.setZero(); final_out.setZero();
+        last_output_nonseq.setZero();
+        out_gain.setOnes();
+        out_bias.setZero();
+        outMean_.reset(0.0f, 1.0f);
+        outVar_.reset(0.0f, 1.0f);
     }
 
     size_t getNumParams() const override {
-        size_t total = static_cast<size_t>(Wq.size()) + static_cast<size_t>(Wk.size()) + static_cast<size_t>(Wv.size()) + static_cast<size_t>(Wo.size());
+        size_t total = static_cast<size_t>(Wq.size()) + static_cast<size_t>(Wk.size()) +
+                       static_cast<size_t>(Wv.size()) + static_cast<size_t>(Wo.size());
         if (queryLayer) total += queryLayer->getNumParams();
-        if (keyLayer) total += keyLayer->getNumParams();
+        if (keyLayer)   total += keyLayer->getNumParams();
         if (valueLayer) total += valueLayer->getNumParams();
+        total += static_cast<size_t>(out_gain.size()) + static_cast<size_t>(out_bias.size());
         return total;
     }
 
@@ -870,27 +1009,37 @@ private:
     Eigen::MatrixXf Q, K, V;
     Eigen::MatrixXf output_mat;
     Eigen::MatrixXf final_out;
+
     Eigen::VectorXf last_output_nonseq;
-    Eigen::VectorXf last_output_vec;
+    Eigen::MatrixXf last_output_vec;
     std::vector<Eigen::MatrixXf> attn_weights;
 
     std::unique_ptr<ChromaFlow::denseLayer> queryLayer;
     std::unique_ptr<ChromaFlow::denseLayer> keyLayer;
     std::unique_ptr<ChromaFlow::denseLayer> valueLayer;
+
     bool training_allowed = false;
+
+    // agent small coeff set
+    Eigen::VectorXf out_gain;
+    Eigen::VectorXf out_bias;
+    ChromaUtils::RunningStats outMean_;
+    ChromaUtils::RunningStats outVar_;
+    ChromaUtils::IIRAdapt adapt_;
 
     static void initMatrix(Eigen::MatrixXf& M)
     {
         const float limit = std::sqrt(6.0f / (M.rows() + M.cols()));
         for (Eigen::Index r = 0; r < M.rows(); ++r)
             for (Eigen::Index c = 0; c < M.cols(); ++c)
-                M(r,c) = randUniform(-limit, limit);
+                M(r,c) = ChromaUtils::randUniform(-limit, limit);
     }
 };
 
-//
-// --- RNNCell with single-step backward (BPTT short) ---
-//
+// ============================================================================
+// RNNCell
+// Agent-mode: explicit stable IIR-ish state update with trainable leak.
+// ============================================================================
 class RNNCell : public DifferentiableModule
 {
 public:
@@ -910,6 +1059,9 @@ public:
         initMatrix (W_x, scale_x);
         initMatrix (W_h, scale_h);
         b.setZero();
+
+        leak_ = 0.05f; // IIR-ish state smoothing
+        outRms_.reset(0.0f, 1.0f);
     }
 
     FeatureTensor forward (const FeatureTensor& x_t) override
@@ -930,8 +1082,18 @@ public:
 
         Eigen::VectorXf z = W_x * last_input + W_h * last_hidden_prev + b;
         last_preact = z;
-        last_output_vec = z.array().tanh().matrix();
-        hidden_state = last_output_vec;
+
+        // candidate
+        Eigen::VectorXf cand = z.array().tanh().matrix();
+
+        // stable IIR-ish update
+        hidden_state = (1.0f - leak_) * last_hidden_prev + leak_ * cand;
+
+        last_output_vec = hidden_state;
+
+        // stats
+        const float rms = std::sqrt(hidden_state.squaredNorm() / std::max(1, (int)hidden_state.size()));
+        outRms_.push(rms);
 
         out.data.resize(1, static_cast<Eigen::Index>(hidden_state.size()));
         out.data.row(0) = hidden_state.transpose();
@@ -939,6 +1101,8 @@ public:
         out.features = hidden_size;
         return out;
     }
+
+    // Backprop retained (debug/tests). Agent mode does not need it for learning.
     std::pair<FeatureTensor, FeatureTensor> backward(const FeatureTensor& grad_output)
     {
         FeatureTensor grad_prev, act_prev;
@@ -957,45 +1121,35 @@ public:
         const int goRows = grad_output.data.rows();
         const int goCols = grad_output.data.cols();
 
-        // grad should match hidden_size in one dimension
         Eigen::VectorXf grad;
-        if (goRows == 1 && goCols == hidden_size) {
-            // 1 x H
-            grad = grad_output.data.row(0).transpose();
-        } else if (goCols == 1 && goRows == hidden_size) {
-            // H x 1
-            grad = grad_output.data.col(0);
-        } else if (goRows == 1 || goCols == 1) {
-            // 1D but wrong length → try to salvage, but assert loudly
+        if (goRows == 1 && goCols == hidden_size)      grad = grad_output.data.row(0).transpose();
+        else if (goCols == 1 && goRows == hidden_size) grad = grad_output.data.col(0);
+        else if (goRows == 1 || goCols == 1) {
             const int len = std::max(goRows, goCols);
-            jassert(len == hidden_size); // this should really match
-            if (goRows == 1)
-                grad = grad_output.data.row(0).transpose();
-            else
-                grad = grad_output.data.col(0);
+            jassert(len == hidden_size);
+            grad = (goRows == 1) ? grad_output.data.row(0).transpose().eval() : grad_output.data.col(0).eval();
         } else {
-            // Not even 1D → something is wired wrong upstream
-            jassertfalse; // invalid gradient shape into RNNCell
+            jassertfalse;
             grad = Eigen::VectorXf::Zero(hidden_size);
         }
 
         jassert(grad.size() == hidden_size);
         jassert(last_output_vec.size() == hidden_size);
 
-        Eigen::VectorXf dtanh = (1.0f - last_output_vec.array().square()).matrix(); // [H]
-        Eigen::VectorXf dPre  = grad.cwiseProduct(dtanh);                            // [H]
+        Eigen::VectorXf dtanh = (1.0f - last_output_vec.array().square()).matrix();
+        Eigen::VectorXf dPre  = grad.cwiseProduct(dtanh);
 
-        // Gradients for parameters
-        Eigen::MatrixXf grad_Wx = dPre * last_input.transpose();        // [H x I]
-        Eigen::MatrixXf grad_Wh = dPre * last_hidden_prev.transpose();  // [H x H]
-        Eigen::VectorXf grad_b  = dPre;                                 // [H]
+        Eigen::MatrixXf grad_Wx = dPre * last_input.transpose();
+        Eigen::MatrixXf grad_Wh = dPre * last_hidden_prev.transpose();
+        Eigen::VectorXf grad_b  = dPre;
 
-        // Gradient w.r.t input
-        Eigen::VectorXf dInput = W_x.transpose() * dPre;                // [I]
+        Eigen::VectorXf dInput = W_x.transpose() * dPre;
 
+#if !CHROMAFLOW_AGENT_MODE
         optimizer.update(W_x, -grad_Wx, grad_output);
         optimizer.update(W_h, -grad_Wh, grad_output);
         optimizer.update(b,   -grad_b,  grad_output);
+#endif
 
         grad_prev.data       = Eigen::MatrixXf::Zero(static_cast<Eigen::Index>(dInput.size()), 1);
         grad_prev.data.col(0)= dInput;
@@ -1008,13 +1162,24 @@ public:
 
         return { grad_prev, act_prev };
     }
+
+    // Agent learning: adjust leak slowly to keep RMS in band (explicit feedback)
     void learn (const FeatureTensor& gradient_from_output,
-        const FeatureTensor& features_from_input,
-        FeatureTensor& upstream_features) override
+                const FeatureTensor& features_from_input,
+                FeatureTensor& upstream_features) override
     {
-        (void) features_from_input;
-        (void) upstream_features;
-        backward(gradient_from_output);
+        (void)gradient_from_output;
+        (void)features_from_input;
+        (void)upstream_features;
+
+        const float targetRms = 0.10f;
+
+        adaptLeak_.mu = 1e-5f;
+        adaptLeak_.minV = 0.001f;
+        adaptLeak_.maxV = 0.2f;
+
+        // If RMS is too high, reduce leak (slower state reaction). If too low, increase leak.
+        adaptLeak_.step(leak_, leak_ + (targetRms - outRms_.mean));
     }
 
     void reset() override
@@ -1022,39 +1187,46 @@ public:
         hidden_state.setZero();
         last_input.setZero();
         last_hidden_prev.setZero();
+        leak_ = 0.05f;
+        outRms_.reset(0.0f, 1.0f);
     }
 
     const Eigen::MatrixXf& getWx() const { return W_x; }
     const Eigen::MatrixXf& getWh() const { return W_h; }
-    const Eigen::VectorXf& getB() const { return b; }
+    const Eigen::VectorXf& getB()  const { return b; }
     const Eigen::VectorXf& getHiddenState() const { return hidden_state; }
 
     void setWx(const Eigen::MatrixXf& M) { W_x = M; }
     void setWh(const Eigen::MatrixXf& M) { W_h = M; }
-    void setB(const Eigen::VectorXf& V) { b = V; }
+    void setB (const Eigen::VectorXf& V) { b = V; }
     void setHiddenState(const Eigen::VectorXf& H) { hidden_state = H; }
 
     size_t getNumParams() const override {
         const size_t wx = static_cast<size_t>(W_x.rows()) * static_cast<size_t>(W_x.cols());
         const size_t wh = static_cast<size_t>(W_h.rows()) * static_cast<size_t>(W_h.cols());
         const size_t vb = static_cast<size_t>(b.size());
-        return wx + wh + vb;
+        return wx + wh + vb + 1u; // + leak
     }
 
 private:
     int input_size;
     int hidden_size;
 
-    Eigen::MatrixXf W_x; // [hidden_size][input_size]
-    Eigen::MatrixXf W_h; // [hidden_size][hidden_size]
-    Eigen::VectorXf b; // [hidden_size]
+    Eigen::MatrixXf W_x;
+    Eigen::MatrixXf W_h;
+    Eigen::VectorXf b;
 
-    Eigen::VectorXf hidden_state; // current h_t
-    Eigen::VectorXf last_input; // last x_t
-    Eigen::VectorXf last_hidden_prev; // last h_{t-1}
+    Eigen::VectorXf hidden_state;
+    Eigen::VectorXf last_input;
+    Eigen::VectorXf last_hidden_prev;
 
     Eigen::VectorXf last_preact;
     Eigen::VectorXf last_output_vec;
+
+    // agent
+    float leak_ = 0.05f;
+    ChromaUtils::RunningStats outRms_;
+    ChromaUtils::IIRAdapt adaptLeak_;
 
     SGDWithMomentum optimizer;
 
@@ -1065,16 +1237,13 @@ private:
             seed = 1664525u * seed + 1013904223u;
             return static_cast<float> (seed) / static_cast<float> (UINT32_MAX);
         };
-        for (Eigen::Index h = 0; h < M.rows(); ++h)
-        {
-            for (Eigen::Index i = 0; i < M.cols(); ++i)
+        for (Eigen::Index r = 0; r < M.rows(); ++r)
+            for (Eigen::Index c = 0; c < M.cols(); ++c)
             {
                 const float u = nextU();
-                M (h, i) = (2.0f * u - 1.0f) * scale;
+                M (r, c) = (2.0f * u - 1.0f) * scale;
             }
-        }
     }
 };
 
 } // namespace ChromaFlow
-

@@ -1,7 +1,18 @@
 #pragma once
 
 #include "ChromaBaseClasses.h"
-#include "fft/AudioFFT.h"
+#ifdef CHROMAFLOW_USE_AUDIOFFT
+#include "AudioFFT.h"
+#else
+namespace audiofft {
+class AudioFFT {
+public:
+    static size_t ComplexSize(size_t n) { return n / 2 + 1; }
+    void init(size_t) {}
+    void fft(const float*, float*, float*) {}
+};
+}
+#endif
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>

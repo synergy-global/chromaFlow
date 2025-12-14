@@ -188,6 +188,7 @@ target_compile_features(ChromaFlow INTERFACE cxx_std_17)
 # Testing (Optional)
 # ==============================================================================
 if(CHROMAFLOW_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests)
 
     # Convenience target: run Catch2 test binary directly (no CTest)
