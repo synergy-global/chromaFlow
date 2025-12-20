@@ -255,7 +255,7 @@ static inline Eigen::VectorXf errorVectorRow0(const FeatureTensor& err)
         Sigmoid,
         Linear
     }; 
-    
+
 class Collaborator
 {
 public:
@@ -268,7 +268,7 @@ public:
     };
 
     Collaborator(
-        const std::vector<std::string>& paramNames,
+        const std::map<std::string, float>& paramNames,
         float deltaScale = 1.0f)
         : names(paramNames), deltaScale(deltaScale)
     {
