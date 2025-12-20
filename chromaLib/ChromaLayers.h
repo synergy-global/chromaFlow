@@ -254,87 +254,135 @@ static inline Eigen::VectorXf errorVectorRow0(const FeatureTensor& err)
         Tanh,
         Sigmoid,
         Linear
-    };
-
-    class Collaborator : public DifferentiableModule
+    }; 
+    
+class Collaborator
+{
+public:
+    enum class Mode
     {
-    public:
-        Collaborator(std::map<std::string, float> param_names_map,
-                     std::optional<std::unordered_set<std::string>> invert_names = std::nullopt)
-            : invert_user(invert_names.value_or(std::unordered_set<std::string>{}))
-        {
-            param_names.reserve(param_names_map.size());
-            for (const auto &kv : param_names_map)
-            {
-                param_names.push_back(kv.first);
-                last_params_map[kv.first] = kv.second;
-            }
-        }
-
-        FeatureTensor forward(const FeatureTensor &input) override { return input; }
-
-        ParamTensor predictParams(const FeatureTensor &aiParamWeights, const ParamTensor &user_params) override
-        {
-            const Eigen::Index rows = aiParamWeights.data.rows();
-            const Eigen::Index cols = aiParamWeights.data.cols();
-            const size_t n_names = param_names.size();
-
-            auto get_ai_val = [&](size_t i) -> float
-            {
-                if (rows == 1 && static_cast<Eigen::Index>(i) < cols)
-                    return aiParamWeights.data(0, static_cast<Eigen::Index>(i));
-                if (cols == 1 && static_cast<Eigen::Index>(i) < rows)
-                    return aiParamWeights.data(static_cast<Eigen::Index>(i), 0);
-                if (rows >= 1 && static_cast<Eigen::Index>(i) < cols)
-                    return aiParamWeights.data(0, static_cast<Eigen::Index>(i));
-                return 0.0f;
-            };
-
-            ParamTensor out;
-            last_params_map.clear();
-
-            for (size_t i = 0; i < n_names; ++i)
-            {
-                const std::string &name = param_names[i];
-                const float ai_val = get_ai_val(i);
-
-                float intent = 0.0f;
-                auto it = user_params.data.find(name);
-                if (it != user_params.data.end())
-                    intent = std::fmin(1.0f, std::fmax(0.0f, it->second));
-
-                float final_val;
-                if (intent == 0.0f)
-                {
-                    final_val = ai_val;
-                }
-                else
-                {
-                    const float ai_weight = 1.0f - intent;
-                    const float user_weight = intent;
-                    const float ai_val_scaled = ai_val * 0.2f;
-                    const bool invert = invert_user.find(name) != invert_user.end();
-                    const float user_contribution = invert ? (1.0f - it->second) : it->second;
-
-                    final_val = ai_val_scaled * ai_weight + user_contribution * user_weight;
-                }
-
-                out.data[name] = final_val;
-                last_params_map[name] = final_val;
-            }
-
-            return out;
-        }
-
-        const std::unordered_map<std::string, float> &lastParams() const { return last_params_map; }
-
-        void reset() override { last_params_map.clear(); }
-
-    private:
-        std::vector<std::string> param_names;
-        std::unordered_set<std::string> invert_user;
-        std::unordered_map<std::string, float> last_params_map;
+        AIOnly,     // pure model
+        Override,   // user wins
+        Delta,      // AI + user offset
+        Constraint  // user sets bounds
     };
+
+    Collaborator(
+        const std::vector<std::string>& paramNames,
+        float deltaScale = 1.0f)
+        : names(paramNames), deltaScale(deltaScale)
+    {
+        for (const auto& n : names)
+        {
+            modes[n] = Mode::Override; // sane default
+            lastOut[n] = 0.5f;
+        }
+    }
+
+    // -------------------------------------------------
+    // CONFIG
+    // -------------------------------------------------
+    void setMode(const std::string& name, Mode m)
+    {
+        modes[name] = m;
+    }
+
+    void setDeltaScale(float s) { deltaScale = s; }
+
+    // UI can explicitly say which params are being touched
+    void setUserOverrideMask(const std::unordered_set<std::string>& mask)
+    {
+        userOverrideMask = mask;
+    }
+
+    // -------------------------------------------------
+    // MAIN ENTRY
+    // -------------------------------------------------
+    ParamTensor predictParams(
+        const FeatureTensor& aiOut,
+        const ParamTensor& user)
+    {
+        ParamTensor out;
+
+        for (size_t i = 0; i < names.size(); ++i)
+        {
+            const std::string& name = names[i];
+
+            float ai = getAI(aiOut, i);
+            float u  = getUser(user, name);
+
+            Mode mode = modes[name];
+
+            float v = 0.f;
+
+            switch (mode)
+            {
+                case Mode::AIOnly:
+                    v = ai;
+                    break;
+
+                case Mode::Override:
+                    v = userHasAuthority(name) ? u : ai;
+                    break;
+
+                case Mode::Delta:
+                    // u in [0,1], centered at 0.5
+                    v = ai + (u - 0.5f) * deltaScale;
+                    break;
+
+                case Mode::Constraint:
+                    // user defines max bound
+                    v = std::min(ai, u);
+                    break;
+            }
+
+            v = std::clamp(v, 0.f, 1.f);
+            out.data[name] = v;
+            lastOut[name] = v;
+        }
+
+        return out;
+    }
+
+private:
+    // -------------------------------------------------
+    // HELPERS
+    // -------------------------------------------------
+    float getAI(const FeatureTensor& t, size_t i) const
+    {
+        if (t.data.rows() == 1 && i < (size_t)t.data.cols())
+            return t.data(0, (Eigen::Index)i);
+
+        if (t.data.cols() == 1 && i < (size_t)t.data.rows())
+            return t.data((Eigen::Index)i, 0);
+
+        return 0.f;
+    }
+
+    float getUser(const ParamTensor& p, const std::string& name) const
+    {
+        auto it = p.data.find(name);
+        if (it == p.data.end())
+            return 0.5f; // neutral
+
+        return std::clamp(it->second, 0.f, 1.f);
+    }
+
+    bool userHasAuthority(const std::string& name) const
+    {
+        return userOverrideMask.count(name) > 0;
+    }
+
+private:
+    std::vector<std::string> names;
+
+    std::unordered_map<std::string, Mode> modes;
+    std::unordered_map<std::string, float> lastOut;
+
+    std::unordered_set<std::string> userOverrideMask;
+
+    float deltaScale = 1.0f;
+};
 
     // ==============
     
