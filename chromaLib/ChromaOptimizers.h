@@ -2,6 +2,8 @@
 
 #include "ChromaBaseClasses.h"
 
+// potential FUTURE update using backprop optimizers
+
 namespace ChromaFlow {
 
 /**

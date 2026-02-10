@@ -2,6 +2,7 @@
 
 #include "ChromaBaseClasses.h"
 
+// potential FUTURE update using backprop with loss functions
 namespace ChromaFlow {
 
 class MSEParameterLoss {
