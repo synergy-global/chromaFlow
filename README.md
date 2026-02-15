@@ -164,10 +164,7 @@ When using ctest directly, you may see messages from external packages; running 
 ## Requirements
 - CMake 3.20+
 - C++17 compiler
-- Internet connection for CPM fetches (if not vendored)
-
-### Optional
+- Internet connection for CPM fetches 
 - Conan 1.x/2.x for dependency management
 
-## License
-Add your license here.
+
