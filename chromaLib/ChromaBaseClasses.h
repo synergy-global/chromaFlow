@@ -117,7 +117,7 @@ namespace ChromaFlow
     public:
         virtual ~NeuralDSPLayer() = default;
         /**
-         * Prepares the layer for real-time processing.
+         * Prepares the layer for real-time processing (dsp stuff).
          * @param sampleRate The sample rate of the audio signal.
          */
         virtual void prepare(double sampleRate) = 0;                 /// prepare for real-time processing
@@ -126,7 +126,14 @@ namespace ChromaFlow
          * @param input The input FeatureTensor for adaptation.
          * @return The updated FeatureTensor after adaptation.
          */
-        virtual void adapt(const AudioTensor &input) = 0; // nn goes here
+        virtual void adapt(AudioTensor &input) = 0; // nn goes here
+        /**
+         * Configures the learning parameters for the layer.
+         * @param sr The sample rate of the audio signal.
+         * @param batchSz The batch size for learning.
+         * @param stride The control stride for learning.
+         * @param asyncEnabled Whether to enable asynchronous adaptation.
+         */
         void configureLearning(double sr, int batchSz, int stride, bool asyncEnabled)
         {
             sampleRate_ = sr;
@@ -182,7 +189,12 @@ namespace ChromaFlow
             while (qTail.load(std::memory_order_acquire) != qHead.load(std::memory_order_acquire))
             {
                 size_t idx = qTail.load(std::memory_order_relaxed);
-                adapt(queue_[idx]);
+                // Convert FeatureTensor to AudioTensor before calling adapt
+                AudioTensor audio;
+                audio.data = queue_[idx].data.col(0); // take first (and only) channel
+                audio.numSamples = queue_[idx].numSamples;
+                audio.numChannels = 1;
+                adapt(audio);
                 size_t next = (idx + 1) % queueCapacity;
                 qTail.store(next, std::memory_order_release);
             }
@@ -233,7 +245,12 @@ namespace ChromaFlow
                 }
                 else
                 {
-                    adapt(batch_);
+                    // Convert FeatureTensor to AudioTensor before calling adapt
+                    AudioTensor audio;
+                    audio.data = batch_.data.col(0); // take first (and only) channel
+                    audio.numSamples = batch_.numSamples;
+                    audio.numChannels = 1;
+                    adapt(audio);
                 }
             }
 
@@ -259,140 +276,58 @@ namespace ChromaFlow
     // ==============================================================================
     // UTILITY FUNCTIONS
     // ==============================================================================
-
-    // Local clamp for 0..1 range to avoid relying on std::clamp (C++17)
-    static float clamp01(float v)
+    // activation functions
+    static FeatureTensor clamp01(FeatureTensor v)
     {
-        return std::max(0.0f, std::min(1.0f, v));
+        FeatureTensor result;
+        result.data = v.data.array().max(0.0f).min(1.0f);
+        result.numSamples = v.numSamples;
+        result.features = v.features;
+        return result;
     }
-    static float sigmoid(float x)
+    static FeatureTensor sigmoid(FeatureTensor x)
     {
-        return 1.0f / (1.0f + std::exp(-x));
-    }
-
-    static float tanh(float x)
-    {
-        return std::tanh(x);
-    }
-
-    static float relu(float x)
-    {
-        return std::max(0.0f, x);
-    }
-
-    static float clip(float value, float min_val, float max_val)
-    {
-        return std::max(min_val, std::min(max_val, value));
-    }
-
-    static std::vector<float> clipVector(const std::vector<float> &vec, float min_val, float max_val)
-    {
-        std::vector<float> result(vec.size());
-        for (size_t i = 0; i < vec.size(); ++i)
-        {
-            result[i] = clip(vec[i], min_val, max_val);
-        }
+        FeatureTensor result;
+        result.data = 1.0f / (1.0f + (-x.data.array()).exp());
+        result.numSamples = x.numSamples;
+        result.features = x.features;
         return result;
     }
 
-    static float calculateRMS(const std::vector<float> &audioBlock)
+    static FeatureTensor tanh(FeatureTensor x)
     {
-        if (audioBlock.empty())
-            return 0.0f;
-        float sum = 0.0f;
-        for (float sample : audioBlock)
-        {
-            sum += sample * sample;
-        }
-        return std::sqrt(sum / audioBlock.size());
+        FeatureTensor result;
+        result.data = x.data.array().tanh();
+        result.numSamples = x.numSamples;
+        result.features = x.features;
+        return result;
     }
 
-    static float calculateMeanAbs(const std::vector<float> &audioBlock)
+    static FeatureTensor relu(FeatureTensor x)
     {
-        if (audioBlock.empty())
-            return 0.0f;
-        float sum = 0.0f;
-        for (float sample : audioBlock)
-        {
-            sum += std::abs(sample);
-        }
-        return sum / audioBlock.size();
+        FeatureTensor result;
+        result.data = x.data.array().max(0.0f);
+        result.numSamples = x.numSamples;
+        result.features = x.features;
+        return result;
     }
 
-    static float calculateStd(const std::vector<float> &audioBlock)
+    static FeatureTensor clip(FeatureTensor value, float min_val, float max_val)
     {
-        if (audioBlock.empty())
-            return 0.0f;
-        float mean = 0.0f;
-        for (float sample : audioBlock)
-        {
-            mean += sample;
-        }
-        mean /= audioBlock.size();
-
-        float variance = 0.0f;
-        for (float sample : audioBlock)
-        {
-            float diff = sample - mean;
-            variance += diff * diff;
-        }
-        variance /= audioBlock.size();
-        return std::sqrt(variance);
+        FeatureTensor result;
+        result.data = value.data.array().max(min_val).min(max_val);
+        result.numSamples = value.numSamples;
+        result.features = value.features;
+        return result;
+    }
+    // float versions for utility functions (header-only, so inline)
+    inline float clipf(float v, float minVal, float maxVal)
+    {
+        return std::max(minVal, std::min(maxVal, v));
     }
 
-    static float calculateSkewness(const std::vector<float> &data)
-    {
-        if (data.size() < 3)
-            return 0.0f;
-
-        float mean = 0.0f;
-        for (float val : data)
-            mean += val;
-        mean /= data.size();
-
-        float m2 = 0.0f, m3 = 0.0f;
-        for (float val : data)
-        {
-            float diff = val - mean;
-            m2 += diff * diff;
-            m3 += diff * diff * diff;
-        }
-        m2 /= data.size();
-        m3 /= data.size();
-
-        float std_dev = std::sqrt(m2);
-        if (std_dev < 1e-8f)
-            return 0.0f;
-
-        return m3 / (std_dev * std_dev * std_dev);
-    }
-
-    static float calculateKurtosis(const std::vector<float> &data)
-    {
-        if (data.size() < 4)
-            return 0.0f;
-
-        float mean = 0.0f;
-        for (float val : data)
-            mean += val;
-        mean /= data.size();
-
-        float m2 = 0.0f, m4 = 0.0f;
-        for (float val : data)
-        {
-            float diff = val - mean;
-            float diff2 = diff * diff;
-            m2 += diff2;
-            m4 += diff2 * diff2;
-        }
-        m2 /= data.size();
-        m4 /= data.size();
-
-        if (m2 < 1e-8f)
-            return 0.0f;
-
-        return m4 / (m2 * m2) - 3.0f;
-    }
+    inline float clampf01(float v) { return clipf(v, 0.0f, 1.0f); }
+        
     inline float mapMsToUnit(float ms, float minMs, float maxMs, float curve = 1.0f)
     {
         ms = std::clamp(ms, minMs, maxMs);
@@ -434,8 +369,10 @@ namespace ChromaFlow
         float normalized = (std::log(safeFreq) - logMin) / logRange;
 
         // Clamp to 0..1 range
-        return clamp01(normalized);
+        return clampf01(normalized);
     }
+
+
 
     inline float mapUnitToTimeSamples(float unitValue, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
     {
@@ -461,7 +398,7 @@ namespace ChromaFlow
         float normalized = (timeMS - minMS) / rangeMS;
 
         // Clamp to 0..1 range
-        return clamp01(normalized);
+        return clampf01(normalized);
     }
     inline float mapUnitToLinearRange(float unitValue, float minValue, float maxValue)
     {
@@ -481,7 +418,7 @@ namespace ChromaFlow
         float normalized = (value - minValue) / range;
 
         // Clamp to 0..1 range
-        return clamp01(normalized);
+        return clampf01(normalized);
     }
     inline float mapUnitToAmp(float unitValue, float minDB = -60.0f, float maxDB = 0.0f)
     {
@@ -508,7 +445,7 @@ namespace ChromaFlow
         float normalized = (dbValue - minDB) / dbRange;
 
         // Clamp to 0..1 range
-        return clamp01(normalized);
+        return clampf01(normalized);
     }
 
     /**
