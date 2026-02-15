@@ -64,22 +64,9 @@ namespace ChromaFlow
          */
         // Default forward for neural layers: consume features and emit features
         virtual FeatureTensor forward(const FeatureTensor &input) = 0;
-        // Optional forward overload with user biases (dense-like); default delegates to single-arg
-        virtual FeatureTensor forward(const FeatureTensor &upstream_features,
-                                      const ParamTensor &user_biases) { return forward(upstream_features); }
-
-        // The extractor is the only module consuming AudioTensor directly
-        // virtual FeatureTensor extractFeatures(const AudioTensor& input) = 0;
-        // Collaborator blends AI weights with user params to emit final parameters
-        virtual ParamTensor predictParams(const FeatureTensor &aiParamWeights, const ParamTensor &user_params)
-        {
-            // Default: modules that don't produce parameters just pass through user params.
-            return user_params;
-        }
+        
         // Learning hook; default no-op
-        virtual void learn(const FeatureTensor &gradient_from_output,
-                           const FeatureTensor &features_from_input,
-                           FeatureTensor &upstream_features) {}
+        virtual void learn(const FeatureTensor &error) {}
 
         // Report the number of trainable parameters for this module (default: none)
         virtual size_t getNumParams() const { return 0; }
@@ -119,6 +106,21 @@ namespace ChromaFlow
         virtual void update(Eigen::MatrixXf &parameter,
                             const Eigen::MatrixXf &gradient,
                             const FeatureTensor &features) = 0;
+    };
+    // base class for neural dsp layers
+    class NeuralDSPLayer  
+    {
+    public:
+            virtual ~NeuralDSPLayer() = default;
+            virtual void prepare(double sampleRate) = 0; /// prepare for real-time processing
+            virtual FeatureTensor adapt(const FeatureTensor &input) = 0; // nn goes here
+            virtual float process(float inputSample)
+            {
+                return inputSample;
+            }
+        private:
+            double sampleRate_;
+
     };
 
     // ==============================================================================

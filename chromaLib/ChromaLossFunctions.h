@@ -2,52 +2,135 @@
 
 #include "ChromaBaseClasses.h"
 
-// potential FUTURE update using backprop with loss functions
-namespace ChromaFlow {
+namespace ChromaFlow::LossFunctions
+{
 
-class MSEParameterLoss {
-public:
-    // Mean squared error gradient for feature vectors
-    // Returns dL/dy_pred = 2/N * (y_pred - y_true), as a FeatureTensor [1 x N]
-    ChromaFlow::FeatureTensor calculate(const ChromaFlow::FeatureTensor& output,
-                                        const ChromaFlow::FeatureTensor& target) const {
-        const int N = output.data.cols() > 0 ? static_cast<int>(output.data.cols()) : 0;
+    
+static inline Eigen::VectorXf getRow0Safe(const FeatureTensor& t, int N)
+{
+    Eigen::VectorXf v = Eigen::VectorXf::Zero(N);
 
-        Eigen::VectorXf y_pred;
-        if (output.data.rows() > 0) {
-            y_pred = output.data.row(0).transpose(); // [N x 1]
-        } else {
-            y_pred = Eigen::VectorXf::Zero(static_cast<Eigen::Index>(N));
-        }
-
-        Eigen::VectorXf y_true;
-        if (target.data.rows() > 0) {
-            const int T = static_cast<int>(target.data.cols());
-            // Pad or truncate target to match output length
-            if (T == N) {
-                y_true = target.data.row(0).transpose();
-            } else if (T > N) {
-                y_true = target.data.row(0).transpose().head(static_cast<Eigen::Index>(N));
-            } else { // T < N
-                y_true = Eigen::VectorXf::Zero(static_cast<Eigen::Index>(N));
-                y_true.head(static_cast<Eigen::Index>(T)) = target.data.row(0).transpose();
-            }
-        } else {
-            y_true = Eigen::VectorXf::Zero(static_cast<Eigen::Index>(N));
-        }
-
-        Eigen::VectorXf grad = Eigen::VectorXf::Zero(static_cast<Eigen::Index>(N));
-        if (N > 0) {
-            grad = (2.0f / static_cast<float>(N)) * (y_pred - y_true); // dL/dy
-        }
-
-        FeatureTensor outGrad;
-        outGrad.data.resize(1, static_cast<Eigen::Index>(N));
-        outGrad.data.row(0) = grad.transpose();
-        outGrad.numSamples = 1;
-        outGrad.features = N;
-        return outGrad;
+    if (t.data.rows() > 0)
+    {
+        int T = static_cast<int>(t.data.cols());
+        int n = std::min(T, N);
+        v.head(n) = t.data.row(0).transpose().head(n);
     }
 
+    return v;
+}
+
+static inline FeatureTensor makeGrad(const Eigen::VectorXf& g)
+{
+    FeatureTensor out;
+    out.data.resize(1, g.size());
+    out.data.row(0) = g.transpose();
+    out.numSamples = 1;
+    out.features   = static_cast<int>(g.size());
+    return out;
+}
+
+
+class MSELoss
+{
+public:
+    FeatureTensor calculate(const FeatureTensor& output,
+                            const FeatureTensor& target) const
+    {
+        const int N = static_cast<int>(output.data.cols());
+        if (N <= 0) return makeGrad(Eigen::VectorXf());
+
+        Eigen::VectorXf y = getRow0Safe(output, N);
+        Eigen::VectorXf t = getRow0Safe(target, N);
+
+        Eigen::VectorXf grad = (2.0f / static_cast<float>(N)) * (y - t);
+        return makeGrad(grad);
+    }
 };
+
+
+class L1Loss
+{
+public:
+    FeatureTensor calculate(const FeatureTensor& output,
+                            const FeatureTensor& target) const
+    {
+        const int N = static_cast<int>(output.data.cols());
+        if (N <= 0) return makeGrad(Eigen::VectorXf());
+
+        Eigen::VectorXf y = getRow0Safe(output, N);
+        Eigen::VectorXf t = getRow0Safe(target, N);
+
+        Eigen::VectorXf grad = (y - t).array().sign();
+        grad /= static_cast<float>(N);
+
+        return makeGrad(grad);
+    }
+};
+
+
+class EnergyHomeostasisLoss
+{
+public:
+    FeatureTensor calculate(const FeatureTensor& output,
+                            float targetEnergy) const
+    {
+        const int N = static_cast<int>(output.data.cols());
+        if (N <= 0) return makeGrad(Eigen::VectorXf());
+
+        Eigen::VectorXf y = getRow0Safe(output, N);
+
+        float energy = y.squaredNorm() / static_cast<float>(N);
+        float error  = energy - targetEnergy;
+
+        Eigen::VectorXf grad = (2.0f / static_cast<float>(N)) * error * y;
+
+        return makeGrad(grad);
+    }
+};
+
+
+class VarianceLoss
+{
+public:
+    FeatureTensor calculate(const FeatureTensor& output,
+                            float targetVar) const
+    {
+        const int N = static_cast<int>(output.data.cols());
+        if (N <= 0) return makeGrad(Eigen::VectorXf());
+
+        Eigen::VectorXf y = getRow0Safe(output, N);
+
+        float mean = y.mean();
+        Eigen::VectorXf centered = y.array() - mean;
+
+        float var = centered.squaredNorm() / static_cast<float>(N);
+        float error = var - targetVar;
+
+        Eigen::VectorXf grad =
+            (2.0f / static_cast<float>(N)) * error * centered;
+
+        return makeGrad(grad);
+    }
+};
+ 
+
+class PredictiveLoss
+{
+public:
+    FeatureTensor calculate(const FeatureTensor& prediction,
+                            const FeatureTensor& nextFrame) const
+    {
+        const int N = static_cast<int>(prediction.data.cols());
+        if (N <= 0) return makeGrad(Eigen::VectorXf());
+
+        Eigen::VectorXf y = getRow0Safe(prediction, N);
+        Eigen::VectorXf t = getRow0Safe(nextFrame, N);
+
+        Eigen::VectorXf grad = (y - t) / static_cast<float>(N);
+
+        return makeGrad(grad);
+    }
+};
+
 } // namespace ChromaFlow

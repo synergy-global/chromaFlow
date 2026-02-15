@@ -136,6 +136,21 @@
         "dense": "cpp",
         "eigen": "cpp",
         "cstddef": "cpp",
-        "version": "cpp"
+        "version": "cpp",
+        "__assert": "cpp",
+        "__undef_macros": "cpp",
+        "cassert": "cpp",
+        "ccomplex": "cpp",
+        "cerrno": "cpp",
+        "cfloat": "cpp",
+        "ciso646": "cpp",
+        "climits": "cpp",
+        "concepts": "cpp",
+        "ctgmath": "cpp",
+        "__hash": "cpp",
+        "numeric": "cpp",
+        "system_error": "cpp",
+        "*.evaluator": "cpp",
+        "*.traits": "cpp"
     }
 }

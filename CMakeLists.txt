@@ -126,19 +126,7 @@ if(CHROMAFLOW_USE_JSON)
     )
 endif()
 
-# ==============================================================================
-# Dependencies via FetchContent
-# ==============================================================================
-option(CHROMAFLOW_USE_AUDIOFFT "Include AudioFFT library" OFF)
-if(CHROMAFLOW_USE_AUDIOFFT)
-    FetchContent_Declare(AudioFFT
-        GIT_REPOSITORY https://github.com/HiFi-LoFi/AudioFFT.git
-        GIT_TAG master
-    )
-    FetchContent_MakeAvailable(AudioFFT)
-endif()
 
- 
 # ==============================================================================
 # ChromaFlow Library Target
 # ==============================================================================
@@ -175,10 +163,13 @@ if(CHROMAFLOW_USE_JSON AND TARGET nlohmann_json::nlohmann_json)
     target_link_libraries(ChromaFlow INTERFACE nlohmann_json::nlohmann_json)
 endif()
 
-# Link AudioFFT when enabled and available
-if(CHROMAFLOW_USE_AUDIOFFT AND TARGET AudioFFT)
-    target_link_libraries(ChromaFlow INTERFACE AudioFFT)
+
+
+    
+if(APPLE)
+    target_link_libraries(ChromaFlow INTERFACE "-framework Accelerate")
 endif()
+    
 
 # Compiler features
 target_compile_features(ChromaFlow INTERFACE cxx_std_17)

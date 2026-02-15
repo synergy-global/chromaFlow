@@ -1,18 +1,8 @@
 #pragma once
 
 #include "ChromaBaseClasses.h"
-#ifdef CHROMAFLOW_USE_AUDIOFFT
-#include "AudioFFT.h"
-#else
-namespace audiofft {
-class AudioFFT {
-public:
-    static size_t ComplexSize(size_t n) { return n / 2 + 1; }
-    void init(size_t) {}
-    void fft(const float*, float*, float*) {}
-};
-}
-#endif
+
+#include "ChromaFFT.h"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -66,7 +56,7 @@ public:
         n_fft = nearestPowerOfTwo (n_fft);
 
         fft.init (static_cast<size_t> (n_fft));
-        complex_bins = static_cast<int> (audiofft::AudioFFT::ComplexSize (static_cast<size_t> (n_fft)));
+        complex_bins = static_cast<int> (fft.ComplexSize (static_cast<size_t> (n_fft)));
 
         ensureMelFilterbank();
         ensureDctMatrix();
@@ -298,8 +288,7 @@ private:
     std::unordered_set<std::string> requested;
     int mel_n_mels;
     int complex_bins;
-
-    audiofft::AudioFFT fft;
+    ChromaFFT::AppleAccelerateFFT fft;
     Eigen::MatrixXf mel_filterbank; // [mel_n_mels x complex_bins]
     Eigen::MatrixXf dct_matrix;     // [num_mfcc   x mel_n_mels]
 

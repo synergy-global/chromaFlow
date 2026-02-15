@@ -2,26 +2,24 @@
 #include <iostream>
 #include "chromaLib/ChromaLayers.h"
 
-using namespace ChromaFlow;
+using namespace ChromaFlow::Layers;
 
 TEST_CASE("Layer forwards produce positive outputs", "[Layers]") {
     // Prepare a simple FeatureTensor input with small positive values
-    FeatureTensor in;
+    ChromaFlow::FeatureTensor in;
     in.numSamples = 1;
     in.features = 8;
     in.data = Eigen::MatrixXf::Zero(1, 8);
     in.data.setConstant(0.1f);
 
     SECTION("convolutionalLayer forward > 0") {
-        convolutionalLayer conv(/*inputChannels*/1, /*outputChannels*/4, /*kernelSize*/3);
-        // Use a positive kernel and bias to encourage positive outputs
+        convolutionalLayer conv( /*kernelSize*/3);
         Eigen::VectorXf k(3); k << 0.2f, 0.2f, 0.2f;
         conv.setKernel(k);
-        Eigen::VectorXf b(1); b << 0.05f;
-        conv.setBiases(b);
+        conv.setBias(0.05f);
 
         // Build a 1D column FeatureTensor input expected by conv (N x 1)
-        FeatureTensor convIn;
+        ChromaFlow::FeatureTensor convIn;
         convIn.numSamples = 16;
         convIn.features = 1;
         convIn.data = Eigen::MatrixXf::Ones(16, 1) * 0.1f;
@@ -40,7 +38,7 @@ TEST_CASE("Layer forwards produce positive outputs", "[Layers]") {
     }
 
     SECTION("denseLayer forward > 0") {
-        denseLayer dense(/*inputSize*/8, /*outputSize*/5, ActivationType::LeakyRelu, /*useLayerNorm*/true);
+        DenseLayer dense(/*inputSize*/8, /*outputSize*/5);
         auto out = dense.forward(in);
         REQUIRE(out.data.rows() == 1);
         REQUIRE(out.data.cols() == 5);
@@ -55,10 +53,11 @@ TEST_CASE("Layer forwards produce positive outputs", "[Layers]") {
     }
 
     SECTION("attentionLayer forward > 0 (single-vector path)") {
-        attentionLayer att(/*inputSize*/8, /*outputSize*/8, /*heads*/4, ActivationType::Linear, /*useLayerNorm*/true);
+        attentionLayer att(/*inputSize*/8, /*outputSize*/8);
         auto out = att.forward(in);
         REQUIRE(out.data.rows() == 1);
         REQUIRE(out.data.cols() == 8);
+        
         bool anyPositive = (out.data.array() > 0.0f).any();
         REQUIRE(anyPositive);
         {
