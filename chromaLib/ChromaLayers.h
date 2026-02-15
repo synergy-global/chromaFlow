@@ -318,6 +318,7 @@ private:
     {
     public:
         attentionLayer(int inputSize,
+                       int numHeads,
                        int outputSize)
             : heads(numHeads),
               d_model(outputSize),

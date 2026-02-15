@@ -53,7 +53,7 @@ TEST_CASE("Layer forwards produce positive outputs", "[Layers]") {
     }
 
     SECTION("attentionLayer forward > 0 (single-vector path)") {
-        attentionLayer att(/*inputSize*/8, /*outputSize*/8);
+        attentionLayer att(/*inputSize*/8, /*numHeads*/4, /*outputSize*/8);
         auto out = att.forward(in);
         REQUIRE(out.data.rows() == 1);
         REQUIRE(out.data.cols() == 8);
