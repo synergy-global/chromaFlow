@@ -13,7 +13,6 @@ Tiny, RT‑aware neural DSP and feature extraction library in modern C++17 with 
 - Core tensors and base classes: chromaLib/ChromaBaseClasses.h
 - Layers: chromaLib/ChromaLayers.h
 - Losses: chromaLib/ChromaLossFunctions.h
-- Optimizers: chromaLib/ChromaOptimizers.h
 - Feature extraction: chromaLib/ChromaFeatureExtractor.h
 
 ### Real‑Time Path
