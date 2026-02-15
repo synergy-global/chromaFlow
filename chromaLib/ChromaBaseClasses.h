@@ -7,11 +7,12 @@
 #include "Eigen/Dense"
 #include <algorithm>
 #include <map>
+#include <cassert>
+#include <atomic>
 namespace ChromaFlow
 {
 
-    // ==============================================================================
-    // Tensor Primitive==============================================================================
+    // Tensor Primitive=
     struct AudioTensor
     { // 1D audio tensor with shape (numSamples, channels)
         Eigen::VectorXf data;
@@ -64,7 +65,7 @@ namespace ChromaFlow
          */
         // Default forward for neural layers: consume features and emit features
         virtual FeatureTensor forward(const FeatureTensor &input) = 0;
-        
+
         // Learning hook; default no-op
         virtual void learn(const FeatureTensor &error) {}
 
@@ -107,276 +108,408 @@ namespace ChromaFlow
                             const Eigen::MatrixXf &gradient,
                             const FeatureTensor &features) = 0;
     };
-    // base class for neural dsp layers
-    class NeuralDSPLayer  
+    /**
+     * The abstract base class for all real-time, single-shot optimizers.
+     * Defines the contract for updating a learnable parameter.
+     */
+    class NeuralDSPLayer
     {
     public:
-            virtual ~NeuralDSPLayer() = default;
-            virtual void prepare(double sampleRate) = 0; /// prepare for real-time processing
-            virtual FeatureTensor adapt(const FeatureTensor &input) = 0; // nn goes here
-            virtual float process(float inputSample)
+        virtual ~NeuralDSPLayer() = default;
+        /**
+         * Prepares the layer for real-time processing.
+         * @param sampleRate The sample rate of the audio signal.
+         */
+        virtual void prepare(double sampleRate) = 0;                 /// prepare for real-time processing
+        /**
+         * Adapts the layer to the input features.
+         * @param input The input FeatureTensor for adaptation.
+         * @return The updated FeatureTensor after adaptation.
+         */
+        virtual FeatureTensor adapt(const FeatureTensor &input) = 0; // nn goes here
+        void configureLearning(double sr, int batchSz, int stride, bool asyncEnabled)
+        {
+            sampleRate_ = sr;
+            batchSize = batchSz;
+            controlStride = stride;
+            asyncAdapt = asyncEnabled;
+            if (batch_.data.rows() != batchSize || batch_.data.cols() != 1)
             {
-                return inputSample;
+                batch_.numSamples = batchSize;
+                batch_.features = 1;
+                batch_.data.resize(batchSize, 1);
+                batch_.data.setZero();
             }
-        private:
-            double sampleRate_;
+            queue_.resize(queueCapacity);
+            for (auto &t : queue_)
+            {
+                if (t.data.rows() != batchSize || t.data.cols() != 1)
+                {
+                    t.numSamples = batchSize;
+                    t.features = 1;
+                    t.data.resize(batchSize, 1);
+                }
+                t.data.setZero();
+            }
+            qHead.store(0, std::memory_order_relaxed);
+            qTail.store(0, std::memory_order_relaxed);
+        }
+        void setBatchSize(int b)
+        {
+            batchSize = b;
+            if (batch_.data.rows() != batchSize || batch_.data.cols() != 1)
+            {
+                batch_.numSamples = batchSize;
+                batch_.features = 1;
+                batch_.data.resize(batchSize, 1);
+                batch_.data.setZero();
+            }
+            for (auto &t : queue_)
+            {
+                if (t.data.rows() != batchSize || t.data.cols() != 1)
+                {
+                    t.numSamples = batchSize;
+                    t.features = 1;
+                    t.data.resize(batchSize, 1);
+                }
+                t.data.setZero();
+            }
+        }
+        void setControlStride(int s) { controlStride = s; }
+        void setAsyncAdapt(bool e) { asyncAdapt = e; }
+        void drainAdaptQueue()
+        {
+            while (qTail.load(std::memory_order_acquire) != qHead.load(std::memory_order_acquire))
+            {
+                size_t idx = qTail.load(std::memory_order_relaxed);
+                adapt(queue_[idx]);
+                size_t next = (idx + 1) % queueCapacity;
+                qTail.store(next, std::memory_order_release);
+            }
+        }
+        /**
+         * Processes a single sample of audio.
+         * @param inputSample The input audio sample.
+         * @return The processed audio sample.
+         */
+        virtual float process(float inputSample)
+        {
+            return inputSample;
+        }
+        // PROCESS BLOCK
+        /**
+         * Processes a block of audio samples.
+         * do not override this method
+         * @param input The input audio samples.
+         * @param output The output audio samples.
+         * @param numSamples The number of samples to process.
+         */
+        void processBlock(float *input, float *output, int numSamples)
+        {
+            assert(batch_.data.rows() == batchSize && batch_.data.cols() == 1);
+            if (batchSize == 1)
+            { 
+                batch_.data(0, 0) = input[0];
+            }
+            else
+            {
+                for (int i = 0; i < batchSize; ++i)
+                {
+                    batch_.data(i, 0) = input[i];
+                }   
+            }
+            if (++strideCounter >= controlStride)
+            {
+                strideCounter = 0;
+                if (asyncAdapt)
+                {
+                    size_t head = qHead.load(std::memory_order_relaxed);
+                    size_t next = (head + 1) % queueCapacity;
+                    if (next != qTail.load(std::memory_order_acquire))
+                    {
+                        queue_[head].data = batch_.data;
+                        qHead.store(next, std::memory_order_release);
+                    }
+                }
+                else
+                {
+                    adapt(batch_);
+                }
+            }
 
+            for (int i = 0; i < numSamples; ++i)
+            {
+                output[i] = process(input[i]);
+            }
+        }
+
+    private:
+        double sampleRate_;
+        int controlStride = 100;
+        int strideCounter = 0;
+        int batchSize = 1; // single sample batch by default
+        FeatureTensor batch_;
+        bool asyncAdapt = false;
+        static constexpr size_t queueCapacity = 8;
+        std::vector<FeatureTensor> queue_;
+        std::atomic<size_t> qHead{0};
+        std::atomic<size_t> qTail{0};
     };
 
     // ==============================================================================
     // UTILITY FUNCTIONS
     // ==============================================================================
- 
-        // Local clamp for 0..1 range to avoid relying on std::clamp (C++17)
-        static float clamp01(float v)
+
+    // Local clamp for 0..1 range to avoid relying on std::clamp (C++17)
+    static float clamp01(float v)
+    {
+        return std::max(0.0f, std::min(1.0f, v));
+    }
+    static float sigmoid(float x)
+    {
+        return 1.0f / (1.0f + std::exp(-x));
+    }
+
+    static float tanh(float x)
+    {
+        return std::tanh(x);
+    }
+
+    static float relu(float x)
+    {
+        return std::max(0.0f, x);
+    }
+
+    static float clip(float value, float min_val, float max_val)
+    {
+        return std::max(min_val, std::min(max_val, value));
+    }
+
+    static std::vector<float> clipVector(const std::vector<float> &vec, float min_val, float max_val)
+    {
+        std::vector<float> result(vec.size());
+        for (size_t i = 0; i < vec.size(); ++i)
         {
-            return std::max(0.0f, std::min(1.0f, v));
+            result[i] = clip(vec[i], min_val, max_val);
         }
-        static float sigmoid(float x)
+        return result;
+    }
+
+    static float calculateRMS(const std::vector<float> &audioBlock)
+    {
+        if (audioBlock.empty())
+            return 0.0f;
+        float sum = 0.0f;
+        for (float sample : audioBlock)
         {
-            return 1.0f / (1.0f + std::exp(-x));
+            sum += sample * sample;
         }
+        return std::sqrt(sum / audioBlock.size());
+    }
 
-        static float tanh(float x)
+    static float calculateMeanAbs(const std::vector<float> &audioBlock)
+    {
+        if (audioBlock.empty())
+            return 0.0f;
+        float sum = 0.0f;
+        for (float sample : audioBlock)
         {
-            return std::tanh(x);
+            sum += std::abs(sample);
         }
+        return sum / audioBlock.size();
+    }
 
-        static float relu(float x)
+    static float calculateStd(const std::vector<float> &audioBlock)
+    {
+        if (audioBlock.empty())
+            return 0.0f;
+        float mean = 0.0f;
+        for (float sample : audioBlock)
         {
-            return std::max(0.0f, x);
+            mean += sample;
         }
+        mean /= audioBlock.size();
 
-        static float clip(float value, float min_val, float max_val)
+        float variance = 0.0f;
+        for (float sample : audioBlock)
         {
-            return std::max(min_val, std::min(max_val, value));
+            float diff = sample - mean;
+            variance += diff * diff;
         }
+        variance /= audioBlock.size();
+        return std::sqrt(variance);
+    }
 
-        static std::vector<float> clipVector(const std::vector<float> &vec, float min_val, float max_val)
+    static float calculateSkewness(const std::vector<float> &data)
+    {
+        if (data.size() < 3)
+            return 0.0f;
+
+        float mean = 0.0f;
+        for (float val : data)
+            mean += val;
+        mean /= data.size();
+
+        float m2 = 0.0f, m3 = 0.0f;
+        for (float val : data)
         {
-            std::vector<float> result(vec.size());
-            for (size_t i = 0; i < vec.size(); ++i)
-            {
-                result[i] = clip(vec[i], min_val, max_val);
-            }
-            return result;
+            float diff = val - mean;
+            m2 += diff * diff;
+            m3 += diff * diff * diff;
         }
+        m2 /= data.size();
+        m3 /= data.size();
 
-        static float calculateRMS(const std::vector<float> &audioBlock)
+        float std_dev = std::sqrt(m2);
+        if (std_dev < 1e-8f)
+            return 0.0f;
+
+        return m3 / (std_dev * std_dev * std_dev);
+    }
+
+    static float calculateKurtosis(const std::vector<float> &data)
+    {
+        if (data.size() < 4)
+            return 0.0f;
+
+        float mean = 0.0f;
+        for (float val : data)
+            mean += val;
+        mean /= data.size();
+
+        float m2 = 0.0f, m4 = 0.0f;
+        for (float val : data)
         {
-            if (audioBlock.empty())
-                return 0.0f;
-            float sum = 0.0f;
-            for (float sample : audioBlock)
-            {
-                sum += sample * sample;
-            }
-            return std::sqrt(sum / audioBlock.size());
+            float diff = val - mean;
+            float diff2 = diff * diff;
+            m2 += diff2;
+            m4 += diff2 * diff2;
         }
+        m2 /= data.size();
+        m4 /= data.size();
 
-        static float calculateMeanAbs(const std::vector<float> &audioBlock)
-        {
-            if (audioBlock.empty())
-                return 0.0f;
-            float sum = 0.0f;
-            for (float sample : audioBlock)
-            {
-                sum += std::abs(sample);
-            }
-            return sum / audioBlock.size();
-        }
+        if (m2 < 1e-8f)
+            return 0.0f;
 
-        static float calculateStd(const std::vector<float> &audioBlock)
-        {
-            if (audioBlock.empty())
-                return 0.0f;
-            float mean = 0.0f;
-            for (float sample : audioBlock)
-            {
-                mean += sample;
-            }
-            mean /= audioBlock.size();
+        return m4 / (m2 * m2) - 3.0f;
+    }
+    inline float mapMsToUnit(float ms, float minMs, float maxMs, float curve = 1.0f)
+    {
+        ms = std::clamp(ms, minMs, maxMs);
+        float norm = (ms - minMs) / (maxMs - minMs);
+        return std::pow(norm, 1.0f / curve);
+    }
+    inline float mapUnitToMs(float unit, float minMs, float maxMs, float curve = 1.0f)
+    {
+        unit = std::clamp(unit, 0.0f, 1.0f);
+        float shaped = std::pow(unit, curve);
+        return minMs + shaped * (maxMs - minMs);
+    }
+    inline float mapUnitToLogFrequency(float unitValue, float minFreq = 20.0f, float maxFreq = 20000.0f)
+    {
+        float input = std::max(0.0f, std::min(1.0f, unitValue));
 
-            float variance = 0.0f;
-            for (float sample : audioBlock)
-            {
-                float diff = sample - mean;
-                variance += diff * diff;
-            }
-            variance /= audioBlock.size();
-            return std::sqrt(variance);
-        }
+        // Calculate the log range for the full frequency spectrum
+        const float logMin = std::log(minFreq);
+        const float logMax = std::log(maxFreq);
 
-        static float calculateSkewness(const std::vector<float> &data)
-        {
-            if (data.size() < 3)
-                return 0.0f;
+        // LERP (Linear Interpolation) in log space
+        float logOutput = logMin + input * (logMax - logMin);
 
-            float mean = 0.0f;
-            for (float val : data)
-                mean += val;
-            mean /= data.size();
+        // Convert back to linear space (the frequency in Hz)
+        return std::exp(logOutput);
+    }
+    inline float mapLogFrequencyToUnit(float freq, float minFreq = 20.0f, float maxFreq = 20000.0f)
+    {
+        float safeFreq = std::max(freq, minFreq); // Clamp for safety
 
-            float m2 = 0.0f, m3 = 0.0f;
-            for (float val : data)
-            {
-                float diff = val - mean;
-                m2 += diff * diff;
-                m3 += diff * diff * diff;
-            }
-            m2 /= data.size();
-            m3 /= data.size();
+        // Calculate the log range
+        const float logMin = std::log(minFreq);
+        const float logMax = std::log(maxFreq);
+        const float logRange = logMax - logMin;
 
-            float std_dev = std::sqrt(m2);
-            if (std_dev < 1e-8f)
-                return 0.0f;
+        // Normalize: (Log(Current) - Log(Min)) / Range
+        if (logRange == 0.0f)
+            return 0.0f;
+        float normalized = (std::log(safeFreq) - logMin) / logRange;
 
-            return m3 / (std_dev * std_dev * std_dev);
-        }
+        // Clamp to 0..1 range
+        return clamp01(normalized);
+    }
 
-        static float calculateKurtosis(const std::vector<float> &data)
-        {
-            if (data.size() < 4)
-                return 0.0f;
+    inline float mapUnitToTimeSamples(float unitValue, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
+    {
+        float input = std::max(0.0f, std::min(1.0f, unitValue));
 
-            float mean = 0.0f;
-            for (float val : data)
-                mean += val;
-            mean /= data.size();
+        // 1. Map to Linear Millisecond (MS) Range
+        float timeMS = minMS + (input * (maxMS - minMS));
 
-            float m2 = 0.0f, m4 = 0.0f;
-            for (float val : data)
-            {
-                float diff = val - mean;
-                float diff2 = diff * diff;
-                m2 += diff2;
-                m4 += diff2 * diff2;
-            }
-            m2 /= data.size();
-            m4 /= data.size();
+        // 2. Convert MS to Samples: Samples = MS * (Fs / 1000)
+        return timeMS * (sampleRate / 1000.0f);
+    }
+    inline float mapTimeSamplesToUnit(float samples, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
+    {
+        // 1. Convert Samples back to Milliseconds (MS)
+        float timeMS = samples / (sampleRate / 1000.0f);
 
-            if (m2 < 1e-8f)
-                return 0.0f;
+        // 2. Map MS back to Unit Range (0..1)
+        const float rangeMS = maxMS - minMS;
 
-            return m4 / (m2 * m2) - 3.0f;
-        }
-        inline float mapMsToUnit(float ms, float minMs, float maxMs, float curve = 1.0f)
-        {
-            ms = std::clamp(ms, minMs, maxMs);
-            float norm = (ms - minMs) / (maxMs - minMs);
-            return std::pow(norm, 1.0f / curve);
-        }
-        inline float mapUnitToMs(float unit, float minMs, float maxMs, float curve = 1.0f)
-        {
-            unit = std::clamp(unit, 0.0f, 1.0f);
-            float shaped = std::pow(unit, curve);
-            return minMs + shaped * (maxMs - minMs);
-        }
-        inline float mapUnitToLogFrequency(float unitValue, float minFreq = 20.0f, float maxFreq = 20000.0f)    
-        {
-            float input = std::max(0.0f, std::min(1.0f, unitValue));
+        if (rangeMS == 0.0f)
+            return 0.0f;
 
-            // Calculate the log range for the full frequency spectrum
-            const float logMin = std::log(minFreq);
-            const float logMax = std::log(maxFreq);
+        float normalized = (timeMS - minMS) / rangeMS;
 
-            // LERP (Linear Interpolation) in log space
-            float logOutput = logMin + input * (logMax - logMin);
+        // Clamp to 0..1 range
+        return clamp01(normalized);
+    }
+    inline float mapUnitToLinearRange(float unitValue, float minValue, float maxValue)
+    {
+        // Clamp the input unit value for safety
+        float input = std::max(0.0f, std::min(1.0f, unitValue));
 
-            // Convert back to linear space (the frequency in Hz)
-            return std::exp(logOutput);
-        }
-        inline float mapLogFrequencyToUnit(float freq, float minFreq = 20.0f, float maxFreq = 20000.0f)
-        {
-            float safeFreq = std::max(freq, minFreq); // Clamp for safety
+        // Perform the linear mapping: Output = Min + (Input * Range)
+        return minValue + (input * (maxValue - minValue));
+    }
+    inline float mapLinearRangeToUnit(float value, float minValue, float maxValue)
+    {
+        const float range = maxValue - minValue;
+        if (range == 0.0f)
+            return 0.0f;
 
-            // Calculate the log range
-            const float logMin = std::log(minFreq);
-            const float logMax = std::log(maxFreq);
-            const float logRange = logMax - logMin;
+        // Normalize: (Current - Min) / Range
+        float normalized = (value - minValue) / range;
 
-            // Normalize: (Log(Current) - Log(Min)) / Range
-            if (logRange == 0.0f)
-                return 0.0f;
-            float normalized = (std::log(safeFreq) - logMin) / logRange;
+        // Clamp to 0..1 range
+        return clamp01(normalized);
+    }
+    inline float mapUnitToAmp(float unitValue, float minDB = -60.0f, float maxDB = 0.0f)
+    {
+        // 1. Map Unit Value to dB Scale (Linear interpolation in dB space)
+        float input = std::max(0.0f, std::min(1.0f, unitValue));
+        float dbValue = minDB + (input * (maxDB - minDB));
 
-            // Clamp to 0..1 range
-            return clamp01(normalized);
-        }
+        // 2. Convert dB to Linear Amplitude: pow(10, dB / 20)
+        // Use an anti-denormal guard (std::max(minDB, dbValue)) for safety, though
+        // the previous clamp should suffice.
+        return std::pow(10.0f, dbValue / 20.0f);
+    }
+    inline float mapAmpToUnit(float amplitude, float minDB = -60.0f, float maxDB = 0.0f)
+    {
+        // 1. Convert Linear Amplitude to dB: 20 * log10(Amp)
+        // Use an anti-denormal guard (1e-6) for safety against log(0)
+        float dbValue = 20.0f * std::log10(std::max(amplitude, 1e-6f));
 
-        inline float mapUnitToTimeSamples(float unitValue, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
-        {
-            float input = std::max(0.0f, std::min(1.0f, unitValue));
+        // 2. Map dB Value back to Unit Scale
+        const float dbRange = maxDB - minDB;
+        if (dbRange == 0.0f)
+            return 0.0f;
 
-            // 1. Map to Linear Millisecond (MS) Range
-            float timeMS = minMS + (input * (maxMS - minMS));
+        float normalized = (dbValue - minDB) / dbRange;
 
-            // 2. Convert MS to Samples: Samples = MS * (Fs / 1000)
-            return timeMS * (sampleRate / 1000.0f);
-        }
-        inline float mapTimeSamplesToUnit(float samples, float sampleRate, float minMS = 1.0f, float maxMS = 2000.0f)
-        {
-            // 1. Convert Samples back to Milliseconds (MS)
-            float timeMS = samples / (sampleRate / 1000.0f);
-
-            // 2. Map MS back to Unit Range (0..1)
-            const float rangeMS = maxMS - minMS;
-
-            if (rangeMS == 0.0f)
-                return 0.0f;
-
-            float normalized = (timeMS - minMS) / rangeMS;
-
-            // Clamp to 0..1 range
-            return clamp01(normalized);
-        }
-        inline float mapUnitToLinearRange(float unitValue, float minValue, float maxValue)
-        {
-            // Clamp the input unit value for safety
-            float input = std::max(0.0f, std::min(1.0f, unitValue));
-
-            // Perform the linear mapping: Output = Min + (Input * Range)
-            return minValue + (input * (maxValue - minValue));
-        }
-        inline float mapLinearRangeToUnit(float value, float minValue, float maxValue)
-        {
-            const float range = maxValue - minValue;
-            if (range == 0.0f)
-                return 0.0f;
-
-            // Normalize: (Current - Min) / Range
-            float normalized = (value - minValue) / range;
-
-            // Clamp to 0..1 range
-            return clamp01(normalized);
-        }
-        inline float mapUnitToAmp(float unitValue, float minDB = -60.0f, float maxDB = 0.0f)
-        {
-            // 1. Map Unit Value to dB Scale (Linear interpolation in dB space)
-            float input = std::max(0.0f, std::min(1.0f, unitValue));
-            float dbValue = minDB + (input * (maxDB - minDB));
-
-            // 2. Convert dB to Linear Amplitude: pow(10, dB / 20)
-            // Use an anti-denormal guard (std::max(minDB, dbValue)) for safety, though
-            // the previous clamp should suffice.
-            return std::pow(10.0f, dbValue / 20.0f);
-        }
-        inline float mapAmpToUnit(float amplitude, float minDB = -60.0f, float maxDB = 0.0f)
-        {
-            // 1. Convert Linear Amplitude to dB: 20 * log10(Amp)
-            // Use an anti-denormal guard (1e-6) for safety against log(0)
-            float dbValue = 20.0f * std::log10(std::max(amplitude, 1e-6f));
-
-            // 2. Map dB Value back to Unit Scale
-            const float dbRange = maxDB - minDB;
-            if (dbRange == 0.0f)
-                return 0.0f;
-
-            float normalized = (dbValue - minDB) / dbRange;
-
-            // Clamp to 0..1 range
-            return clamp01(normalized);
-        } 
+        // Clamp to 0..1 range
+        return clamp01(normalized);
+    }
 
     /**
      * @brief Utility class for analyzing the size and memory footprint of

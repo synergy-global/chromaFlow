@@ -1,6 +1,6 @@
 #pragma once
-#include "ChromaBaseClasses.h"
-#include "ChromaOptimizers.h"
+#include "./ChromaBaseClasses.h"
+
 #include <memory>
 #include <random>
 
@@ -558,12 +558,19 @@ private:
         ChromaFlow::FeatureTensor forward(const ChromaFlow::FeatureTensor &input) override
         {
             ChromaFlow::FeatureTensor out = input;
-            Eigen::RowVectorXf mean = input.data.colwise().mean();
-            out.data = input.data.rowwise() - mean;
-            Eigen::RowVectorXf denom = input.data.colwise().norm().array().sqrt().matrix();
-            out.data = (out.data.array().rowwise() / denom.array()).matrix();
-            out.data = (out.data.array().rowwise() * gain.transpose().array()).matrix();
-            out.data = (out.data.array().rowwise() + biasVec.transpose().array()).matrix();
+            const int rows = static_cast<int>(input.data.rows());
+            const int cols = static_cast<int>(input.data.cols());
+            if (rows > 0 && cols > 0)
+            {
+                const float eps = 1e-6f;
+                Eigen::VectorXf mean = input.data.rowwise().mean();
+                out.data = input.data.colwise() - mean;
+                Eigen::VectorXf var = out.data.array().square().rowwise().mean();
+                Eigen::VectorXf denom = (var.array() + eps).sqrt().matrix();
+                out.data = out.data.array().colwise() / denom.array();
+                out.data = (out.data.array().rowwise() * gain.transpose().array()).matrix();
+                out.data = (out.data.array().rowwise() + biasVec.transpose().array()).matrix();
+            }
             return out;
         }
 
