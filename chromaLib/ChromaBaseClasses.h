@@ -126,7 +126,7 @@ namespace ChromaFlow
          * @param input The input FeatureTensor for adaptation.
          * @return The updated FeatureTensor after adaptation.
          */
-        virtual FeatureTensor adapt(const FeatureTensor &input) = 0; // nn goes here
+        virtual void adapt(const AudioTensor &input) = 0; // nn goes here
         void configureLearning(double sr, int batchSz, int stride, bool asyncEnabled)
         {
             sampleRate_ = sr;
