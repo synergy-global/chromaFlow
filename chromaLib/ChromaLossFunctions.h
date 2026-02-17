@@ -43,7 +43,7 @@ public:
     virtual FeatureTensor calculate(const FeatureTensor& input,
                                      const FeatureTensor& output) const = 0;
  
-    virtual void setTarget(float target) = 0;
+    void setTarget(float target) = 0;
  
     float target;
 };
