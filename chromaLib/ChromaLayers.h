@@ -17,16 +17,9 @@
 
 #ifndef jassert
 #define jassert(x) assert(x)
-#define jassertfalse assert(false)
+#define jassertfalse assert(false) 
 #endif
-
-// ============================
-// Agent mode (forward-only)
-// ============================
-#ifndef CHROMAFLOW_AGENT_MODE
-#define CHROMAFLOW_AGENT_MODE 1
-#endif
-
+// TODO: Add documentation for each layer 
 namespace ChromaUtils
 {
 

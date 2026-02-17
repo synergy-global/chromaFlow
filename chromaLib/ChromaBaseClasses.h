@@ -9,6 +9,8 @@
 #include <map>
 #include <cassert>
 #include <atomic>
+
+// TODO: Add documentation for each primitive
 namespace ChromaFlow
 {
 
@@ -320,6 +322,27 @@ namespace ChromaFlow
         result.features = value.features;
         return result;
     }
+
+    
+
+static inline Eigen::VectorXf getRowVector(const FeatureTensor& t)
+{
+    if (t.data.rows() > 0)
+        return t.data.row(0).transpose();
+
+    return Eigen::VectorXf::Zero(t.features);
+}
+
+static inline FeatureTensor toFeatureTensor(const Eigen::VectorXf& v)
+{
+    FeatureTensor out;
+    out.data.resize(1, v.size());
+    out.data.row(0) = v.transpose();
+    out.numSamples = 1;
+    out.features = (int)v.size();
+    return out;
+}
+ 
     // float versions for utility functions (header-only, so inline)
     inline float clipf(float v, float minVal, float maxVal)
     {
