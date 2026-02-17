@@ -33,25 +33,34 @@ static inline FeatureTensor makeGrad(const Eigen::VectorXf& g)
 }
 
 
-
-// interface for single input target losses
+ 
 class ILoss
 {
 public:
-    virtual FeatureTensor calculate(const FeatureTensor& output) const = 0;
-    // 2 input losses special case
+    virtual FeatureTensor calculate(const FeatureTensor& output) const
+    {
+        Eigen::VectorXf y = getRowVector(output);
+        return toFeatureTensor(Eigen::VectorXf::Zero(y.size()));
+    }
+
     virtual FeatureTensor calculate(const FeatureTensor& input,
-                                     const FeatureTensor& output) const = 0;
- 
-    void setTarget(float target) = 0;
- 
-    float target;
+                                    const FeatureTensor& output) const
+    {
+        (void) input;
+        return calculate(output);
+    }
+
+    virtual void setTarget(float t)
+    {
+        target = t;
+    }
+
+    float target = 0.0f;
 };
 
 class SelfSupervisedSibilanceLoss : public ILoss
 {
-public:
-
+public: 
     FeatureTensor calculate(const FeatureTensor& input,
                             const FeatureTensor& output) const override
     {
