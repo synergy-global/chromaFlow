@@ -107,13 +107,7 @@ namespace ChromaFlow::Layers
         return v;
     }
 
-    enum class ActivationType
-    {
-        LeakyRelu,
-        Tanh,
-        Sigmoid,
-        Linear
-    };
+    
 
     class convolutionalLayer : public DifferentiableModule
 {

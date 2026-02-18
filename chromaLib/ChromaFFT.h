@@ -8,7 +8,15 @@
 #include <Accelerate/Accelerate.h> 
 #endif 
 #if !defined(__APPLE__)
-// TODO: Add other FFT implementations SSE, AVX, AVX2, AVX512
+#if defined(__AVX512F__)
+#include <immintrin.h>
+#endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #endif
 
 // TODO: Add documentation for FFT implementation

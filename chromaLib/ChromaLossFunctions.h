@@ -146,7 +146,7 @@ public:
 
     float eps = 1e-8f;
 
-    FeatureTensor calculate(const FeatureTensor& output) const
+    FeatureTensor calculate(const FeatureTensor& output) const override
     {
         Eigen::VectorXf y = getRowVector(output);
         const int N = (int)y.size();
@@ -172,7 +172,7 @@ public:
 
     float eps = 1e-8f;
 
-    FeatureTensor calculate(const FeatureTensor& output) const
+    FeatureTensor calculate(const FeatureTensor& output) const override
     {
         Eigen::VectorXf f = getRowVector(output);
         if (f.size() < 2)
@@ -194,13 +194,12 @@ public:
  
 class SpectralFluxLoss : public ILoss
 {
-public:
-    float alpha = 0.95f;
+public: 
 
     mutable Eigen::VectorXf prev;
     mutable bool hasPrev = false;
 
-    FeatureTensor calculate(const FeatureTensor& output) const
+    FeatureTensor calculate(const FeatureTensor& output) const override
     {
         Eigen::VectorXf y = getRowVector(output);
 
@@ -212,18 +211,18 @@ public:
         }
 
         Eigen::VectorXf diff = y - prev;
-        prev = alpha * prev + (1.0f - alpha) * y;
+        prev = target * prev + (1.0f - target) * y;
 
         return toFeatureTensor(diff);
     }
 }; 
-class EnergyConservationLoss
+class EnergyConservationLoss : public ILoss
 {
 public:
     float eps = 1e-8f;
 
-    FeatureTensor calculate(const FeatureTensor& output,
-                            const FeatureTensor& input) const
+    FeatureTensor calculate(const FeatureTensor& input,
+                            const FeatureTensor& output) const override
     {
         Eigen::VectorXf y = getRowVector(output);
         Eigen::VectorXf x = getRowVector(input);
@@ -244,21 +243,189 @@ public:
 
 class HarmonicEnergyLoss : public ILoss
 {
-public:
-    float maxEnergy = 1.0f;
-
-    FeatureTensor calculate(const FeatureTensor& output) const
+public: 
+    FeatureTensor calculate(const FeatureTensor& output) const override
     {
         Eigen::VectorXf y = getRowVector(output);
         if (y.size() == 0)
             return toFeatureTensor(y);
 
         float energy = y.array().square().mean();
-        float diff = std::max(0.0f, energy - maxEnergy);
+        float diff = std::max(0.0f, energy - target);
 
         Eigen::VectorXf grad = 2.0f * diff * y;
         return toFeatureTensor(grad);
+    }   
+};
+// ============================================================
+// 1️⃣ Stereo Width Target Loss
+// Encourages M/S energy ratio toward target width
+// ============================================================
+
+class StereoWidthLoss : public ILoss
+{
+public: 
+    float eps = 1e-8f;
+
+    FeatureTensor calculate(const FeatureTensor& Output) const override
+    {
+        Eigen::VectorXf y = getRowVector(Output);
+        if (y.size() < 2)
+            return toFeatureTensor(y);      
+
+        float L = y(0);
+        float R = y(1);
+
+        float mid  = 0.5f * (L + R);
+        float side = 0.5f * (L - R);
+
+        float midE  = mid * mid + eps;
+        float sideE = side * side + eps;
+
+        float width = std::sqrt(sideE / midE);
+        float diff = width - target;
+
+        Eigen::VectorXf grad(2);
+
+        // Push side relative to mid
+        grad(0) =  diff * (L - R);
+        grad(1) = -diff * (L - R);
+
+        return toFeatureTensor(grad);
     }
-    void setTargetEnergy(float energy) { maxEnergy = energy; }      
+};
+
+// ============================================================
+// 2️⃣ Correlation Control Loss
+// Encourages correlation toward target
+// ============================================================
+
+class StereoCorrelationLoss : public ILoss
+{
+public: 
+    float eps = 1e-8f;
+
+    FeatureTensor calculate(const FeatureTensor& Output) const override
+    {
+        Eigen::VectorXf y = getRowVector(Output);
+        if (y.size() < 2)
+            return toFeatureTensor(y);
+
+        float L = y(0);
+        float R = y(1);
+
+        float corr = (L * R) / (std::sqrt(L*L * R*R) + eps);
+        float diff = corr - target;
+
+        Eigen::VectorXf grad(2);
+        grad(0) = diff * R;
+        grad(1) = diff * L;
+
+        return toFeatureTensor(grad);
+    }
+};
+
+// ============================================================
+// 3️⃣ Mono Compatibility Loss
+// Penalises destructive phase cancellation
+// ============================================================
+
+class MonoCompatibilityLoss : public ILoss
+{
+public:
+    float eps = 1e-8f;
+
+    FeatureTensor calculate(const FeatureTensor& Output) const override
+    {
+        Eigen::VectorXf y = getRowVector(Output);
+        if (y.size() < 2)
+            return toFeatureTensor(y);  
+
+        float L = y(0);
+        float R = y(1);
+
+        float mono = 0.5f * (L + R);
+        float stereoE = L*L + R*R;
+        float monoE   = mono * mono * 2.0f;
+
+        float diff = stereoE - monoE;
+
+        Eigen::VectorXf grad(2);
+        grad(0) = diff * (L - mono);
+        grad(1) = diff * (R - mono);
+
+        return toFeatureTensor(grad);
+    }
+};
+
+// ============================================================
+// 4️⃣ Spatial Energy Balance Loss
+// Prevents one side dominance
+// ============================================================
+
+class StereoBalanceLoss : public ILoss
+{
+public:
+    float eps = 1e-8f;
+
+    FeatureTensor calculate(const FeatureTensor& Output) const override
+    {
+        Eigen::VectorXf y = getRowVector(Output);
+        if (y.size() < 2)
+            return toFeatureTensor(y);
+
+        float L = y(0);
+        float R = y(1);
+
+        float diff = (L*L) - (R*R);
+
+        Eigen::VectorXf grad(2);
+        grad(0) = 2.0f * diff * L;
+        grad(1) = -2.0f * diff * R;
+
+        return toFeatureTensor(grad);
+    }
+};
+
+// ============================================================
+// 5️⃣ Decorrelated Width Expansion Loss
+// Encourages side energy but penalises extreme anti-phase
+// ============================================================
+
+class ControlledExpansionLoss : public ILoss
+{
+public: 
+    float maxAntiPhase = -0.7f;
+    float eps = 1e-8f;
+
+    FeatureTensor calculate(const FeatureTensor& Output) const override
+    {
+        Eigen::VectorXf y = getRowVector(Output);
+        if (y.size() < 2)
+            return toFeatureTensor(y);  
+
+        float L = y(0);
+        float R = y(1);
+
+        float mid  = 0.5f * (L + R);
+        float side = 0.5f * (L - R);
+
+        float sideE = side * side;
+        float corr  = (L * R) / (std::sqrt(L*L * R*R) + eps);
+
+        float widthDiff = sideE - target;
+        float corrPenalty = std::min(0.0f, corr - maxAntiPhase);
+
+        Eigen::VectorXf grad(2);
+
+        grad(0) = widthDiff * (L - R) + corrPenalty * R;
+        grad(1) = -widthDiff * (L - R) + corrPenalty * L;
+
+        return toFeatureTensor(grad);
+    }
+    void setAntiPhase(float maxAntiPhase)
+    {
+        this->maxAntiPhase = maxAntiPhase;
+    }
 };
 } // namespace ChromaFlow

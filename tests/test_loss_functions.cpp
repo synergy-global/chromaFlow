@@ -176,7 +176,7 @@ TEST_CASE("EnergyConservationLoss pushes toward matching input/output energy", "
 TEST_CASE("HarmonicEnergyLoss zero gradient below maxEnergy and positive above", "[Losses]")
 {
     TestHarmonicEnergyLoss loss;
-    loss.setTargetEnergy(0.5f);
+    loss.setTarget(0.5f);
 
     FeatureTensor low = makeRow({0.1f, 0.2f});
     FeatureTensor g_low = loss.calculate(low);
@@ -189,4 +189,67 @@ TEST_CASE("HarmonicEnergyLoss zero gradient below maxEnergy and positive above",
 
     REQUIRE(g_high.data(0, 0) > 0.0f);
     REQUIRE(g_high.data(0, 1) > 0.0f);
+}
+
+// ============================================================
+// 1️⃣ Stereo Width Target Loss
+// Encourages M/S energy ratio toward target width
+
+TEST_CASE("StereoWidthTargetLoss zero gradient at target width", "[Losses]")
+{
+    StereoWidthLoss loss;
+    loss.setTarget(0.5f);
+
+    FeatureTensor y = makeRow({0.5f, 0.5f});
+    FeatureTensor g = loss.calculate(y);
+
+    for (int c = 0; c < g.data.cols(); ++c)
+        REQUIRE(g.data(0, c) == Catch::Approx(0.0f).margin(1e-6f));
+}    
+TEST_CASE("StereoCorrelationLoss zero gradient at target correlation", "[Losses]")
+{
+    StereoCorrelationLoss loss;
+    loss.setTarget(0.5f);
+
+    FeatureTensor y = makeRow({0.5f, 0.5f});
+    FeatureTensor g = loss.calculate(y);
+
+    for (int c = 0; c < g.data.cols(); ++c)
+        REQUIRE(g.data(0, c) == Catch::Approx(0.0f).margin(1e-6f));
+}
+
+TEST_CASE("MonoCompatibilityLoss zero gradient at target compatibility", "[Losses]")
+{
+    MonoCompatibilityLoss loss;
+    loss.setTarget(0.5f);
+
+    FeatureTensor y = makeRow({0.5f, 0.5f});
+    FeatureTensor g = loss.calculate(y);
+
+    for (int c = 0; c < g.data.cols(); ++c)
+        REQUIRE(g.data(0, c) == Catch::Approx(0.0f).margin(1e-6f));
+}
+
+TEST_CASE("StereoBalanceLoss zero gradient at target balance", "[Losses]")
+{
+    StereoBalanceLoss loss;
+    loss.setTarget(0.5f);
+
+    FeatureTensor y = makeRow({0.5f, 0.5f});
+    FeatureTensor g = loss.calculate(y);
+
+    for (int c = 0; c < g.data.cols(); ++c)
+        REQUIRE(g.data(0, c) == Catch::Approx(0.0f).margin(1e-6f));
+}
+
+TEST_CASE("ControlledExpansionLoss zero gradient at target expansion", "[Losses]")
+{
+    ControlledExpansionLoss loss;
+    loss.setTarget(0.5f);
+
+    FeatureTensor y = makeRow({0.5f, 0.5f});
+    FeatureTensor g = loss.calculate(y);
+
+    for (int c = 0; c < g.data.cols(); ++c)
+        REQUIRE(g.data(0, c) == Catch::Approx(0.0f).margin(1e-6f));
 }

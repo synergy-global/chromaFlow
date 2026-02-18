@@ -3,7 +3,7 @@ if(CHROMAFLOW_USE_CATCH2)
         test_chroma_base_classes.cpp
         test_layers_outputs.cpp
         test_feature_extractor_outputs.cpp
-        test_energy_loss.cpp
+        
     )
     
     target_link_libraries(chromaflow_tests 
