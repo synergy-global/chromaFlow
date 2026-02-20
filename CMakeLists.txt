@@ -31,15 +31,8 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 # ==============================================================================
 # Package Managers Setup
 # ==============================================================================
-# download CPM.cmake if missing
-file(DOWNLOAD
-    "https://github.com/cpm-cmake/CPM.cmake/releases/download/v0.38.3/CPM.cmake"
-    "${CHROMAFLOW_CPM_CMAKE}"
-    TLS_VERIFY ON
-    SHOW_PROGRESS
-)
 
-include(cmake/CPM.cmake)
+
 
 # Download CPM if not available
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CPM.cmake")
@@ -49,6 +42,7 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CPM.cmake")
     )
 endif()
 
+include(cmake/CPM.cmake)
 # 2. Conan Setup (if conandata.txt or conanfile exists)
 if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/conanbuildinfo.cmake")
     include(${CMAKE_CURRENT_BINARY_DIR}/conanbuildinfo.cmake)
