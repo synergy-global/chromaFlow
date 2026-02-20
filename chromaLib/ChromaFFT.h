@@ -8,15 +8,194 @@
 #include <Accelerate/Accelerate.h> 
 #endif 
 #if !defined(__APPLE__)
-#if defined(__AVX512F__)
-#include <immintrin.h>
-#endif
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
-#if defined(__SSE2__)
-#include <emmintrin.h>
-#endif
+
+class Radix2FFTImpl : public ChromaFFTImpl {
+public:
+    Radix2FFTImpl()
+        : _size(0), _log2(0)
+    {}
+
+    void init(size_t size) override
+    {
+        assert(IsPowerOf2(size));
+        _size = size;
+        _log2 = 0;
+        while ((static_cast<size_t>(1) << _log2) < _size)
+            ++_log2;
+
+        _bitRev.resize(_size);
+        _twRe.resize(_size / 2);
+        _twIm.resize(_size / 2);
+
+        computeBitReverse();
+        computeTwiddles();
+    }
+
+    void fft(const float* data, float* re, float* im) override
+    {
+        // Copy input
+        for (size_t i = 0; i < _size; ++i)
+        {
+            re[i] = data[i];
+            im[i] = 0.0f;
+        }
+
+        bitReverseReorder(re, im);
+
+        for (size_t stage = 1; stage <= _log2; ++stage)
+        {
+            size_t m = 1 << stage;
+            size_t m2 = m >> 1;
+            size_t step = _size / m;
+
+            for (size_t k = 0; k < _size; k += m)
+            {
+                for (size_t j = 0; j < m2; ++j)
+                {
+                    size_t tw = j * step;
+
+                    float wr = _twRe[tw];
+                    float wi = _twIm[tw];
+
+                    size_t t = k + j;
+                    size_t u = t + m2;
+
+                    float tr = wr * re[u] - wi * im[u];
+                    float ti = wr * im[u] + wi * re[u];
+
+                    float ur = re[t];
+                    float ui = im[t];
+
+                    re[t] = ur + tr;
+                    im[t] = ui + ti;
+
+                    re[u] = ur - tr;
+                    im[u] = ui - ti;
+                }
+            }
+        }
+    }
+
+    void ifft(float* data, const float* reIn, const float* imIn) override
+    {
+        // Copy input
+        for (size_t i = 0; i < _size; ++i)
+        {
+            _reTmp[i] = reIn[i];
+            _imTmp[i] = imIn[i];
+        }
+
+        // Conjugate
+        for (size_t i = 0; i < _size; ++i)
+            _imTmp[i] = -_imTmp[i];
+
+        // Forward FFT
+        fftInternal(_reTmp.data(), _imTmp.data());
+
+        // Conjugate + scale
+        const float scale = 1.0f / static_cast<float>(_size);
+        for (size_t i = 0; i < _size; ++i)
+            data[i] = _reTmp[i] * scale;
+    }
+
+    size_t ComplexSize(size_t size) override
+    {
+        return size / 2 + 1;
+    }
+
+private:
+    size_t _size;
+    size_t _log2;
+
+    std::vector<size_t> _bitRev;
+    std::vector<float> _twRe;
+    std::vector<float> _twIm;
+
+    std::vector<float> _reTmp;
+    std::vector<float> _imTmp;
+
+    void computeBitReverse()
+    {
+        for (size_t i = 0; i < _size; ++i)
+        {
+            size_t x = i;
+            size_t r = 0;
+            for (size_t b = 0; b < _log2; ++b)
+            {
+                r = (r << 1) | (x & 1);
+                x >>= 1;
+            }
+            _bitRev[i] = r;
+        }
+    }
+
+    void computeTwiddles()
+    {
+        constexpr float twoPi = 6.28318530717958647692f;
+
+        for (size_t k = 0; k < _size / 2; ++k)
+        {
+            float angle = -twoPi * k / static_cast<float>(_size);
+            _twRe[k] = std::cos(angle);
+            _twIm[k] = std::sin(angle);
+        }
+
+        _reTmp.resize(_size);
+        _imTmp.resize(_size);
+    }
+
+    void bitReverseReorder(float* re, float* im)
+    {
+        for (size_t i = 0; i < _size; ++i)
+        {
+            size_t j = _bitRev[i];
+            if (j > i)
+            {
+                std::swap(re[i], re[j]);
+                std::swap(im[i], im[j]);
+            }
+        }
+    }
+
+    void fftInternal(float* re, float* im)
+    {
+        bitReverseReorder(re, im);
+
+        for (size_t stage = 1; stage <= _log2; ++stage)
+        {
+            size_t m = 1 << stage;
+            size_t m2 = m >> 1;
+            size_t step = _size / m;
+
+            for (size_t k = 0; k < _size; k += m)
+            {
+                for (size_t j = 0; j < m2; ++j)
+                {
+                    size_t tw = j * step;
+
+                    float wr = _twRe[tw];
+                    float wi = _twIm[tw];
+
+                    size_t t = k + j;
+                    size_t u = t + m2;
+
+                    float tr = wr * re[u] - wi * im[u];
+                    float ti = wr * im[u] + wi * re[u];
+
+                    float ur = re[t];
+                    float ui = im[t];
+
+                    re[t] = ur + tr;
+                    im[t] = ui + ti;
+
+                    re[u] = ur - tr;
+                    im[u] = ui - ti;
+                }
+            }
+        }
+    }
+};
+
 #endif
 
 // TODO: Add documentation for FFT implementation

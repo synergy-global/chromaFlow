@@ -151,6 +151,7 @@
         "numeric": "cpp",
         "system_error": "cpp",
         "*.evaluator": "cpp",
-        "*.traits": "cpp"
+        "*.traits": "cpp",
+        "*.expression": "cpp"
     }
 }
