@@ -1,14 +1,21 @@
+/**
+ * @file ChromaFFT.h
+ * @brief Platform-specific FFT backends for ChromaFlow.
+ */
 #pragma once
 
 
 #include <cassert>
 #include <cstring>
-#include <vector> 
+#include <vector>
 #ifdef __APPLE__
-#include <Accelerate/Accelerate.h> 
-#endif 
+#include <Accelerate/Accelerate.h>
+#endif
 #if !defined(__APPLE__)
 
+/**
+ * @brief Portable radix-2 FFT implementation used when Accelerate is unavailable.
+ */
 class Radix2FFTImpl : public ChromaFFTImpl {
 public:
     Radix2FFTImpl()
@@ -198,25 +205,35 @@ private:
 
 #endif
 
-// TODO: Add documentation for FFT implementation
 namespace ChromaFFT {
  
 
+/**
+ * @brief Abstract FFT interface wrapping platform-specific implementations.
+ */
 class ChromaFFTImpl {
 public:
   ChromaFFTImpl() = default;
   ChromaFFTImpl(const ChromaFFTImpl&) = delete;
   ChromaFFTImpl& operator=(const ChromaFFTImpl&) = delete;
   virtual ~ChromaFFTImpl() = default;
+  /// Initialise FFT state for a given transform size.
   virtual void init(size_t size) = 0;
+  /// Compute forward FFT of real-valued input.
   virtual void fft(const float* data, float* re, float* im) = 0;
+  /// Compute inverse FFT of complex input into real output.
   virtual void ifft(float* data, const float* re, const float* im) = 0;
+  /// Return number of complex bins for a real FFT of given size.
   virtual size_t ComplexSize(size_t size) = 0;
 };
 
+/// Utility: check if a value is a power of two.
 constexpr bool IsPowerOf2(size_t val) {
   return (val == 1 || (val & (val - 1)) == 0);
 }
+/**
+ * @brief FFT implementation backed by Apple Accelerate (vDSP).
+ */
 class AppleAccelerateFFT : public ChromaFFTImpl {
 public:
   AppleAccelerateFFT()

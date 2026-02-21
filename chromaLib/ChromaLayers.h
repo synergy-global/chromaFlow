@@ -1,3 +1,7 @@
+/**
+ * @file ChromaLayers.h
+ * @brief Real-time neural DSP layers and supporting utilities.
+ */
 #pragma once
 #include "./ChromaBaseClasses.h"
 
@@ -17,180 +21,112 @@
 
 #ifndef jassert
 #define jassert(x) assert(x)
-#define jassertfalse assert(false) 
+#define jassertfalse assert(false)
 #endif
-// TODO: Add documentation for each layer 
-namespace ChromaUtils
-{
 
-    static inline float clip(float v, float minVal, float maxVal)
-    {
-        return std::max(minVal, std::min(maxVal, v));
-    }
-    static inline float clip01(float v) { return clip(v, 0.0f, 1.0f); }
-
-    // Deterministic tiny RNG (no random_device)
-    static inline uint32_t lcg(uint32_t &s)
-    {
-        s = 1664525u * s + 1013904223u;
-        return s;
-    }
-    static inline float u01(uint32_t &s) { return (lcg(s) >> 8) * (1.0f / 16777216.0f); } // 24-bit
-    static inline float randUniform(float a, float b)
-    {
-        static thread_local uint32_t seed = 0xC0FFEEu;
-        return a + (b - a) * u01(seed);
-    }
-
-    // Stable 1st-order adaptation primitive (DSP-ish)
-    struct IIRAdapt
-    {
-        float mu = 1e-4f;
-        float minV = -2.0f;
-        float maxV = 2.0f;
-
-        inline float step(float &p, float target)
-        {
-            p += mu * (target - p);
-            p = clip(p, minV, maxV);
-            return p;
-        }
-
-        inline void stepVec(Eigen::VectorXf &p, const Eigen::VectorXf &target)
-        {
-            const int n = std::min<int>(p.size(), target.size());
-            for (int i = 0; i < n; ++i)
-                step(p[i], target[i]);
-        }
-    };
-
-    // Streaming stats (bounded + stable)
-    struct RunningStats
-    {
-        float a = 0.01f;
-        float mean = 0.0f;
-        float var = 1.0f;
-
-        inline void reset(float mean0 = 0.0f, float var0 = 1.0f)
-        {
-            mean = mean0;
-            var = var0;
-        }
-
-        inline void push(float x)
-        {
-            const float d = x - mean;
-            mean += a * d;
-            var += a * (d * d - var);
-            var = std::max(var, 1e-8f);
-        }
-    };
-
-} // namespace ChromaUtils
-
+/**
+ * @brief Trainable layers built on top of ChromaFlow primitives.
+ */
 namespace ChromaFlow::Layers
 {
 
-
-    // build error vector from FeatureTensor (row0 preferred)
-    static inline Eigen::VectorXf errorVectorRow0(const ChromaFlow::FeatureTensor &err)
-    {
-        if (err.data.size() == 0)
-            return Eigen::VectorXf();
-        if (err.data.rows() == 1)
-            return err.data.row(0).transpose();
-        // if multiple rows, average down to 1 vector
-        Eigen::VectorXf v = Eigen::VectorXf::Zero((int)err.data.cols());
-        for (Eigen::Index r = 0; r < err.data.rows(); ++r)
-            v += err.data.row(r).transpose();
-        v /= (float)std::max<Eigen::Index>(1, err.data.rows());
-        return v;
-    }
-
-    
-
+    /**
+     * @brief Simple 1D convolutional layer with IIR-style learning.
+     */
     class convolutionalLayer : public DifferentiableModule
-{
-public:
-    convolutionalLayer(int kernelSize)
-        : K(kernelSize)
     {
-        weights.resize(K);
-        grad.resize(K);
-        buffer.resize(K);
-        buffer.setZero();
-        grad.setZero();
+    public:
+        explicit convolutionalLayer(int kernelSize)
+            : K(kernelSize)
+        {
+            weights.resize(K);
+            grad.resize(K);
+            buffer.resize(K);
+            buffer.setZero();
+            grad.setZero();
 
-        for (int i = 0; i < K; ++i)
-            weights(i) = ChromaUtils::randUniform(-0.01f, 0.01f);
-    }
+            for (int i = 0; i < K; ++i)
+                weights(i) = randUniform(-0.01f, 0.01f);
+        }
 
-    void setKernel(const Eigen::VectorXf &w)
-    {
-        const int n = std::min<int>(K, w.size());
-        for (int i = 0; i < n; ++i)
-            weights(i) = w(i);
-    }
+        /// Set kernel coefficients from a vector (truncated if necessary).
+        void setKernel(const Eigen::VectorXf &w)
+        {
+            const int n = std::min<int>(K, w.size());
+            for (int i = 0; i < n; ++i)
+                weights(i) = w(i);
+        }
 
-    void setBias(float b)
-    {
-        bias = b;
-    }
+        /// Set bias term applied after convolution.
+        void setBias(float b)
+        {
+            bias = b;
+        }
 
-    FeatureTensor forward(const ChromaFlow::FeatureTensor &x) override
-    {
-        // shift ring buffer
-        for (int i = K - 1; i > 0; --i)
-            buffer(i) = buffer(i - 1);
-        buffer(0) = x.data(0, 0);
+        /**
+         * @brief Forward pass: process a single-sample FeatureTensor.
+         */
+        FeatureTensor forward(const ChromaFlow::FeatureTensor &x) override
+        {
+            // shift ring buffer
+            for (int i = K - 1; i > 0; --i)
+                buffer(i) = buffer(i - 1);
+            buffer(0) = x.data(0, 0);
 
-        float y = weights.dot(buffer) + bias;
-        last_output = y;
-        ChromaFlow::FeatureTensor out;  
-        out.data.resize(1, 1);
-        out.data(0, 0) = y;
-        out.numSamples = 1;
-        out.features = 1;
-        return out;
-    }
+            float y = weights.dot(buffer) + bias;
+            last_output = y;
+            ChromaFlow::FeatureTensor out;
+            out.data.resize(1, 1);
+            out.data(0, 0) = y;
+            out.numSamples = 1;
+            out.features = 1;
+            return out;
+        }
 
-    void learn(const ChromaFlow::FeatureTensor &error) override
-    {
-        if (error.features != 1)
-            return;
+        /**
+         * @brief Learn from a scalar error using truncated IIR backprop.
+         */
+        void learn(const ChromaFlow::FeatureTensor &error) override
+        {
+            if (error.features != 1)
+                return;
 
-        // IIR truncated BPTT
-        delta = deltaAlpha * delta + (1.0f - deltaAlpha) * errorVectorRow0(error)(0);
+            // IIR truncated BPTT
+            delta = deltaAlpha * delta + (1.0f - deltaAlpha) * errorVectorRow0(error)(0);
 
-        // instant gradient
-        Eigen::VectorXf dW = delta * buffer;
+            // instant gradient
+            Eigen::VectorXf dW = delta * buffer;
 
-        // smooth gradient
-        grad = gradAlpha * grad + (1.0f - gradAlpha) * dW;
+            // smooth gradient
+            grad = gradAlpha * grad + (1.0f - gradAlpha) * dW;
 
-        // update
-        weights -= learningRate * grad;
+            // update
+            weights -= learningRate * grad;
 
-        // clip
-        for (int i = 0; i < K; ++i)
-            weights(i) = ChromaUtils::clip(weights(i), -wMax, wMax);
-    }
+            // clip
+            for (int i = 0; i < K; ++i)
+                weights(i) = clipf(weights(i), -wMax, wMax);
+        }
 
-private:
-    int K;
-    Eigen::VectorXf weights;
-    Eigen::VectorXf grad;
-    Eigen::VectorXf buffer;
+    private:
+        int K;
+        Eigen::VectorXf weights;
+        Eigen::VectorXf grad;
+        Eigen::VectorXf buffer;
 
-    float last_output = 0.0f;
-    float delta = 0.0f;
-    float bias = 0.0f;
+        float last_output = 0.0f;
+        float delta = 0.0f;
+        float bias = 0.0f;
 
-    float learningRate = 1e-6f;
-    float deltaAlpha   = 0.98f;
-    float gradAlpha    = 0.995f;
-    float wMax         = 2.0f;
-};
+        float learningRate = 1e-6f;
+        float deltaAlpha = 0.98f;
+        float gradAlpha = 0.995f;
+        float wMax = 2.0f;
+    };
+
+    /**
+     * @brief Fully-connected layer with IIR-style gradient accumulation.
+     */
     class DenseLayer : public DifferentiableModule
     {
     public:
@@ -207,7 +143,7 @@ private:
 
             for (int r = 0; r < outSize; ++r)
                 for (int c = 0; c < inSize; ++c)
-                    weights(r, c) = ChromaUtils::randUniform(-limit, limit);
+                    weights(r, c) = randUniform(-limit, limit);
 
             last_input.resize(inSize);
             last_output.resize(outSize);
@@ -269,7 +205,7 @@ private:
 
             //  Hard clip weights (critical for RT stability)
             weights = weights.unaryExpr([this](float v)
-                                        { return ChromaUtils::clip(v, -wMax, wMax); });
+                                        { return clipf(v, -wMax, wMax); });
         }
 
         void reset() override
@@ -315,7 +251,7 @@ private:
 
             queryLayer = std::make_unique<DenseLayer>(inputSize, outputSize);
             keyLayer = std::make_unique<DenseLayer>(inputSize, outputSize);
-            valueLayer = std::make_unique<DenseLayer>(inputSize, outputSize); 
+            valueLayer = std::make_unique<DenseLayer>(inputSize, outputSize);
         }
 
         ChromaFlow::FeatureTensor forward(const ChromaFlow::FeatureTensor &input) override
@@ -349,7 +285,7 @@ private:
                 }
 
                 Eigen::VectorXf res = att.cwiseProduct(v);
- 
+
                 ChromaFlow::FeatureTensor out;
                 out.data.resize(1, (Eigen::Index)res.size());
                 out.data.row(0) = res.transpose();
@@ -358,7 +294,7 @@ private:
                 last_out_vec = res;
                 return out;
             }
- 
+
             const int seq_len = (int)input.data.rows();
             ChromaFlow::FeatureTensor out = input; // fallback
             out.data = Eigen::MatrixXf::Zero(seq_len, d_model);
@@ -395,25 +331,24 @@ private:
                     att = Eigen::VectorXf::Constant((int)expS.size(), 1.0f / std::max(1, (int)expS.size()));
                 }
                 Eigen::VectorXf res = att.cwiseProduct(v);
- 
 
                 out.data.row(t) = res.transpose();
             }
 
             return out;
         }
-        
+
         void learn(const ChromaFlow::FeatureTensor &error) override
         {
             queryLayer->learn(error);
             keyLayer->learn(error);
-            valueLayer->learn(error);   
+            valueLayer->learn(error);
         }
 
         void reset() override
         {
             last_input.setZero();
-            last_out_vec.setZero();   
+            last_out_vec.setZero();
         }
 
         size_t getNumParams() const override
@@ -445,7 +380,6 @@ private:
         std::unique_ptr<DenseLayer> queryLayer;
         std::unique_ptr<DenseLayer> keyLayer;
         std::unique_ptr<DenseLayer> valueLayer;
- 
     };
 
     class RNNCell : public DifferentiableModule
@@ -487,7 +421,7 @@ private:
                 return;
 
             // IIR truncated credit assignment
-            delta = deltaAlpha * delta + (1.0f - deltaAlpha) * error.data.row(0).transpose();   
+            delta = deltaAlpha * delta + (1.0f - deltaAlpha) * error.data.row(0).transpose();
 
             // derivative of tanh
             Eigen::VectorXf dtanh = (1.0f - h.array().square()).matrix();
@@ -507,10 +441,10 @@ private:
 
             // stability clamp
             Wx = Wx.unaryExpr([this](float v)
-                              { return ChromaUtils::clip(v, -wMax, wMax); });
+                              { return clipf(v, -wMax, wMax); });
 
             Wh = Wh.unaryExpr([this](float v)
-                              { return ChromaUtils::clip(v, -wMax, wMax); });
+                              { return clipf(v, -wMax, wMax); });
         }
 
     private:

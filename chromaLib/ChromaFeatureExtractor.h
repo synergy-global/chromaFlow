@@ -1,3 +1,7 @@
+/**
+ * @file ChromaFeatureExtractor.h
+ * @brief Windowing, FFT and high-level feature extraction primitives.
+ */
 #pragma once
 
 #include "ChromaBaseClasses.h"
@@ -15,10 +19,9 @@
 namespace ChromaFlow
 {
 
-// ================================================================
-// Window
-// ================================================================
-
+/**
+ * @brief Window types used for STFT.
+ */
 enum class WindowType
 {
     Hann,
@@ -26,9 +29,18 @@ enum class WindowType
     Blackman
 };
 
+/**
+ * @brief Time-domain window with RMS normalization.
+ */
 class Window
 {
 public:
+    /**
+     * @brief Initialise the window coefficients.
+     *
+     * @param size Number of samples in the window.
+     * @param type Window type.
+     */
     void init(size_t size, WindowType type = WindowType::Hann)
     {
         assert(size > 0);
@@ -61,12 +73,16 @@ public:
         computeNormalization();
     }
 
+    /**
+     * @brief Apply the window in-place to a buffer.
+     */
     inline void apply(float* data) const noexcept
     {
         for (size_t i = 0; i < _size; ++i)
             data[i] *= _data[i];
     }
 
+    /// @brief Return the RMS normalization factor.
     inline float normalization() const noexcept { return _norm; }
 
 private:
@@ -85,14 +101,22 @@ private:
     }
 };
 
-// ================================================================
-// FeatureExtractor
-// ================================================================
-
+/**
+ * @brief STFT-based feature extractor (MFCCs and spectral descriptors).
+ */
 class FeatureExtractor : public featureExtraction
 {
 public:
 
+    /**
+     * @brief Construct a new FeatureExtractor.
+     *
+     * @param sampleRate   Input sample rate in Hz.
+     * @param nFft         FFT size (rounded to nearest power of two).
+     * @param numMfcc      Number of MFCC coefficients to compute.
+     * @param featureNames Feature names to include (e.g. "mfcc", "zcr").
+     * @param winType      Window type used before FFT.
+     */
     FeatureExtractor(int sampleRate,
                      int nFft = 512,
                      int numMfcc = 13,
@@ -111,7 +135,8 @@ public:
         : sample_rate(sampleRate),
           n_fft(nearestPow2(std::max(8, nFft))),
           num_mfcc(std::max(1, numMfcc)),
-          requested(featureNames.begin(), featureNames.end())
+          requested(featureNames.begin(), featureNames.end()),
+          mel_n_mels(40)
     {
         fft.init(n_fft);
         complex_bins = int(fft.ComplexSize(n_fft));
@@ -129,10 +154,16 @@ public:
         for (int k = 0; k < complex_bins; ++k)
             freqs[k] = float(k) * float(sample_rate) / float(n_fft);
 
-        ensureMel();
-        ensureDct();
+        ensureMelFilterbank();
+        ensureDctMatrix();
     }
 
+    /**
+     * @brief Extract a single feature frame from a mono AudioTensor.
+     *
+     * @param input Input audio block.
+     * @return FeatureTensor with one row of features.
+     */
     FeatureTensor extractFeatures(const AudioTensor& input) override
     {
         const int inSize = int(input.data.size());
@@ -156,7 +187,9 @@ public:
 
         // ---------- FFT block ----------
         Eigen::VectorXf block = Eigen::VectorXf::Zero(n_fft);
-        block.head(std::min(inSize, n_fft)) = input.data.head(std::min(inSize, n_fft));
+        const int copyLen = std::min(inSize, n_fft);
+        for (int i = 0; i < copyLen; ++i)
+            block(i) = input.data(i);
 
         window.apply(block.data());
         block *= window.normalization();
@@ -244,7 +277,7 @@ private:
     int n_fft;
     int num_mfcc;
     int complex_bins;
-
+    int mel_n_mels;
     std::unordered_set<std::string> requested;
 
 #ifdef __APPLE__
@@ -266,6 +299,7 @@ private:
     Eigen::VectorXf freqs;
     Eigen::VectorXf cumsum;
 
+    /// @brief Nearest power-of-two less than or equal to @p n.
     static int nearestPow2(int n)
     {
         int p = 1;
@@ -273,6 +307,12 @@ private:
         return p;
     }
 
+    /**
+     * @brief Apply sinusoidal liftering to MFCC coefficients.
+     *
+     * @param mfcc Coefficient vector (modified in-place).
+     * @param L    Lifter length.
+     */
     void applyLifter(Eigen::VectorXf& mfcc, int L)
     {
         if (L <= 0) return;
@@ -284,6 +324,7 @@ private:
         }
     }
 
+        /// @brief Nearest power-of-two less than or equal to @p n.
         static int nearestPowerOfTwo(int n)
         {
             int p = 1;
@@ -292,9 +333,14 @@ private:
             return p;
         }
 
+        /**
+         * @brief Lazily build the mel filterbank matrix.
+         *
+         * Depends on @c n_fft, @c sample_rate and @c complex_bins.
+         */
         void ensureMelFilterbank()
         {
-            if (mel_filterbank.rows() == mel_n_mels && mel_filterbank.cols() == complex_bins)
+            if (mel_filter.rows() == mel_n_mels && mel_filter.cols() == complex_bins)
                 return;
 
             const float low_freq_mel = 0.0f;
@@ -320,8 +366,8 @@ private:
                 bin_points[static_cast<size_t>(i)] = bin;
             }
 
-            mel_filterbank.resize(mel_n_mels, complex_bins);
-            mel_filterbank.setZero();
+            mel_filter.resize(mel_n_mels, complex_bins);
+            mel_filter.setZero();
             for (int m = 1; m <= mel_n_mels; ++m)
             {
                 const int f_m_minus = bin_points[static_cast<size_t>(m - 1)];
@@ -333,25 +379,28 @@ private:
                 for (int k = f_m_minus; k < f_m; ++k)
                 {
                     float denom = std::max(1, f_m - f_m_minus);
-                    mel_filterbank(m - 1, k) =
+                    mel_filter(m - 1, k) =
                         (static_cast<float>(k - f_m_minus) / static_cast<float>(denom));
                 }
 
                 for (int k = f_m; k < f_m_plus; ++k)
                 {
                     float denom = std::max(1, f_m_plus - f_m);
-                    mel_filterbank(m - 1, k) =
+                    mel_filter(m - 1, k) =
                         (static_cast<float>(f_m_plus - k) / static_cast<float>(denom));
                 }
             }
         }
 
+        /**
+         * @brief Lazily build the DCT matrix used for MFCCs.
+         */
         void ensureDctMatrix()
         {
-            if (dct_matrix.rows() == num_mfcc && dct_matrix.cols() == mel_n_mels)
+            if (dct.rows() == num_mfcc && dct.cols() == mel_n_mels)
                 return;
 
-            dct_matrix = Eigen::MatrixXf(num_mfcc, mel_n_mels);
+            dct = Eigen::MatrixXf(num_mfcc, mel_n_mels);    
             const float N = static_cast<float>(mel_n_mels);
             const float scale0 = std::sqrt(1.0f / (4.0f * N));
             const float scale = std::sqrt(1.0f / (2.0f * N));
@@ -363,7 +412,7 @@ private:
                 {
                     const float angle = pi * (static_cast<float>(n) + 0.5f) * static_cast<float>(k) / N;
                     float s = std::cos(angle);
-                    dct_matrix(k, n) = (k == 0 ? (2.0f * scale0) : (2.0f * scale)) * s;
+                    dct(k, n) = (k == 0 ? (2.0f * scale0) : (2.0f * scale)) * s;
                 }
             }
         }
@@ -373,9 +422,15 @@ private:
     // DynamicsSummarizer (unchanged except formatting)
     // =======================================================================
 
+    /**
+     * @brief One-shot dynamics summariser (RMS, DR, crest factor, peak, kurtosis).
+     */
     class DynamicsSummarizer : public featureExtraction
     {
     public:
+        /**
+         * @brief Type of dynamics feature to compute.
+         */
         enum class DynamicsType
         {
             RMS,
@@ -385,11 +440,22 @@ private:
             Kurtosis
         };
 
+        /**
+         * @brief Construct a new DynamicsSummarizer.
+         *
+         * @param type Dynamics metric to compute.
+         */
         explicit DynamicsSummarizer(DynamicsType type)
             : dynamicsType(type)
         {
         }
 
+        /**
+         * @brief Extract the configured dynamics feature from an AudioTensor.
+         *
+         * @param input Input audio block.
+         * @return FeatureTensor containing a single scalar feature.
+         */
         FeatureTensor extractFeatures(const AudioTensor &input) override
         {
             switch (dynamicsType)

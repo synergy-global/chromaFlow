@@ -152,6 +152,8 @@
         "system_error": "cpp",
         "*.evaluator": "cpp",
         "*.traits": "cpp",
-        "*.expression": "cpp"
+        "*.expression": "cpp",
+        "*.entry": "cpp",
+        "*.main": "cpp"
     }
 }

@@ -1,27 +1,16 @@
+/**
+ * @file ChromaLossFunctions.h
+ * @brief Loss functions for self-supervised and target-based training.
+ */
 #pragma once
 
 #include "ChromaBaseClasses.h"
 
-// TODO: Add documentation for each loss function
-
 namespace ChromaFlow::LossFunctions
 {
-
-    
-static inline Eigen::VectorXf getRow0Safe(const FeatureTensor& t, int N)
-{
-    Eigen::VectorXf v = Eigen::VectorXf::Zero(N);
-    
-    if (t.data.rows() > 0)
-    {
-        int T = static_cast<int>(t.data.cols());
-        int n = std::min(T, N);
-        v.head(n) = t.data.row(0).transpose().head(n);
-    }
-    
-    return v;
-}
-
+    /**
+     * @brief Wrap a gradient vector as a single-row FeatureTensor.
+     */
 static inline FeatureTensor makeGrad(const Eigen::VectorXf& g)
 {
     FeatureTensor out;
@@ -34,15 +23,33 @@ static inline FeatureTensor makeGrad(const Eigen::VectorXf& g)
 
 
  
+/**
+ * @brief Base class for differentiable loss functions.
+ *
+ * Provides default no-op implementations so subclasses
+ * can override only the signatures they need.
+ */
 class ILoss
 {
 public:
+    /**
+     * @brief Calculate gradient with respect to a single output tensor.
+     *
+     * Default implementation returns a zero gradient.
+     */
     virtual FeatureTensor calculate(const FeatureTensor& output) const
     {
         Eigen::VectorXf y = getRowVector(output);
         return toFeatureTensor(Eigen::VectorXf::Zero(y.size()));
     }
 
+
+
+    /**
+     * @brief Calculate gradient given input and output tensors.
+     *
+     * Default implementation forwards to the single-tensor overload.
+     */
     virtual FeatureTensor calculate(const FeatureTensor& input,
                                     const FeatureTensor& output) const
     {
@@ -50,6 +57,11 @@ public:
         return calculate(output);
     }
 
+
+
+    /**
+     * @brief Set a scalar target used by the loss.
+     */
     virtual void setTarget(float t)
     {
         target = t;
@@ -58,9 +70,15 @@ public:
     float target = 0.0f;
 };
 
+/**
+ * @brief Two-input loss for controlling sibilance while preserving energy.
+ */
 class SelfSupervisedSibilanceLoss : public ILoss
 {
-public: 
+public:
+    /**
+     * @brief Compute gradient using high-frequency and RMS features.
+     */
     FeatureTensor calculate(const FeatureTensor& input,
                             const FeatureTensor& output) const override
     {
@@ -114,13 +132,15 @@ private:
     }
 }; 
 
-// single input target losses
-// setting the target value for the loss to a fixed value
-// useful for normalizing the output of a network to a fixed range or task specific models(sometimes)
-
+/**
+ * @brief RMS homeostasis loss with scalar target.
+ *
+ * Drives RMS of the output toward @c target.
+ */
 class RMSHomeostasisLoss : public ILoss
 {
 public: 
+    /// Numerical stability epsilon.
     float eps = 1e-8f;
 
     FeatureTensor calculate(const FeatureTensor& output) const override
@@ -136,14 +156,31 @@ public:
         Eigen::VectorXf grad = (2.0f / (float)N) * diff * (y / (rms + eps));
         return toFeatureTensor(grad);
     } 
-
+    /**
+     * @brief Set RMS target value.
+     */
+    void setTarget(float t) override
+    {
+        target = t;
+    }
 };
  
 
+/**
+ * @brief Crest factor loss (ratio of peak to RMS).
+ */
 class CrestFactorLoss : public ILoss
 {
 public:
+    /**
+     * @brief Set desired crest factor target.
+     */
+    void setTarget(float t) override
+    {
+        target = t;
+    }
 
+    /// Numerical stability epsilon.
     float eps = 1e-8f;
 
     FeatureTensor calculate(const FeatureTensor& output) const override
@@ -165,7 +202,9 @@ public:
     }
 }; 
 
-// interface for single input target losses
+/**
+ * @brief Spectral tilt loss between low and high bands.
+ */
 class SpectralTiltLoss : public ILoss
 {
 public:
@@ -192,9 +231,14 @@ public:
     }
 };
  
+/**
+ * @brief Spectral flux loss between consecutive frames.
+ *
+ * Uses an internal previous-frame state.
+ */
 class SpectralFluxLoss : public ILoss
 {
-public: 
+public:
 
     mutable Eigen::VectorXf prev;
     mutable bool hasPrev = false;
@@ -215,7 +259,13 @@ public:
 
         return toFeatureTensor(diff);
     }
-}; 
+};
+
+/**
+ * @brief Two-input energy conservation loss.
+ *
+ * Penalises mismatch between input and output energy.
+ */
 class EnergyConservationLoss : public ILoss
 {
 public:
@@ -241,9 +291,12 @@ public:
 };
  
 
+/**
+ * @brief Loss that penalises excess harmonic energy above a target.
+ */
 class HarmonicEnergyLoss : public ILoss
 {
-public: 
+public:
     FeatureTensor calculate(const FeatureTensor& output) const override
     {
         Eigen::VectorXf y = getRowVector(output);
@@ -255,7 +308,7 @@ public:
 
         Eigen::VectorXf grad = 2.0f * diff * y;
         return toFeatureTensor(grad);
-    }   
+    }
 };
 // ============================================================
 // 1️⃣ Stereo Width Target Loss
@@ -264,14 +317,14 @@ public:
 
 class StereoWidthLoss : public ILoss
 {
-public: 
+public:
     float eps = 1e-8f;
 
     FeatureTensor calculate(const FeatureTensor& Output) const override
     {
         Eigen::VectorXf y = getRowVector(Output);
         if (y.size() < 2)
-            return toFeatureTensor(y);      
+            return toFeatureTensor(y);
 
         float L = y(0);
         float R = y(1);
@@ -302,7 +355,7 @@ public:
 
 class StereoCorrelationLoss : public ILoss
 {
-public: 
+public:
     float eps = 1e-8f;
 
     FeatureTensor calculate(const FeatureTensor& Output) const override
@@ -339,7 +392,7 @@ public:
     {
         Eigen::VectorXf y = getRowVector(Output);
         if (y.size() < 2)
-            return toFeatureTensor(y);  
+            return toFeatureTensor(y);
 
         float L = y(0);
         float R = y(1);
@@ -394,7 +447,7 @@ public:
 
 class ControlledExpansionLoss : public ILoss
 {
-public: 
+public:
     float maxAntiPhase = -0.7f;
     float eps = 1e-8f;
 
@@ -402,7 +455,7 @@ public:
     {
         Eigen::VectorXf y = getRowVector(Output);
         if (y.size() < 2)
-            return toFeatureTensor(y);  
+            return toFeatureTensor(y);
 
         float L = y(0);
         float R = y(1);
@@ -423,6 +476,8 @@ public:
 
         return toFeatureTensor(grad);
     }
+
+    /// Set maximum allowed anti-phase correlation.
     void setAntiPhase(float maxAntiPhase)
     {
         this->maxAntiPhase = maxAntiPhase;
