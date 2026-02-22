@@ -138,8 +138,10 @@ namespace ChromaFlow::Layers
 
             weights.resize(outSize, inSize);
             gradW.resize(outSize, inSize);
+            eligibility.resize(outSize, inSize); // 🔥 FIX
             weights.setZero();
             gradW.setZero();
+            eligibility.setZero(); // 🔥 FIX
 
             for (int r = 0; r < outSize; ++r)
                 for (int c = 0; c < inSize; ++c)
