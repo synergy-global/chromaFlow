@@ -200,8 +200,14 @@ namespace ChromaFlow::Layers
             //  IIR gradient smoothing
             gradW = gradAlpha * gradW + (1.0f - gradAlpha) * dW;
 
-            //  Update
-            weights -= learningRate * gradW;
+            // IIR eligibility update
+            eligibility = alpha * eligibility + gradW;
+            // Clip eligibility
+            eligibility = eligibility.unaryExpr([&](float v)
+                                                { return std::clamp(v, -gradClip, gradClip); });
+
+            // Parameter update
+            weights -= lr * eligibility;
 
             //  Hard clip weights (critical for RT stability)
             weights = weights.unaryExpr([this](float v)
@@ -233,9 +239,13 @@ namespace ChromaFlow::Layers
 
         // --- Stability knobs ---
         float learningRate = 1e-5f;
-        float deltaAlpha = 0.98f; // BPTT truncation memory
-        float gradAlpha = 0.995f; // gradient smoothing
-        float wMax = 3.0f;        // hard bound
+        float deltaAlpha = 0.98f;    // BPTT truncation memory
+        float gradAlpha = 0.995f;    // gradient smoothing
+        float wMax = 3.0f;           // hard bound
+        Eigen::MatrixXf eligibility; // same size as weights
+        float alpha = 0.9f;
+        float lr = 0.001f;
+        float gradClip = 1.0f;
     };
     class attentionLayer : public DifferentiableModule
     {

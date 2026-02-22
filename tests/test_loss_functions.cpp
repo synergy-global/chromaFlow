@@ -253,3 +253,15 @@ TEST_CASE("ControlledExpansionLoss zero gradient at target expansion", "[Losses]
     for (int c = 0; c < g.data.cols(); ++c)
         REQUIRE(g.data(0, c) == Catch::Approx(0.0f).margin(1e-6f));
 }
+
+TEST_CASE("NeuralOptoCompressorLoss zero gradient at target compression", "[Losses]")
+{
+    NeuralOptoCompressorLoss loss;
+    loss.setTarget(0.5f);
+
+    FeatureTensor y = makeRow({0.5f, 0.5f});
+    FeatureTensor g = loss.calculate(y);
+
+    for (int c = 0; c < g.data.cols(); ++c)
+        REQUIRE(g.data(0, c) == Catch::Approx(0.0f).margin(1e-6f));
+}

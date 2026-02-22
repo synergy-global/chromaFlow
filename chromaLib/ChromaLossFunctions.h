@@ -197,7 +197,7 @@ public:
         float diff = crest - target;
 
         // approximate gradient: push toward RMS scaling
-        Eigen::VectorXf grad = diff * y.normalized();
+        Eigen::VectorXf grad = diff * y / (rms + eps);
         return toFeatureTensor(grad);
     }
 }; 
@@ -309,6 +309,102 @@ public:
         Eigen::VectorXf grad = 2.0f * diff * y;
         return toFeatureTensor(grad);
     }
+};
+
+/**
+ * @brief Neural compressor loss function.
+ *
+ * Penalises RMS reduction, crest factor, and transient energy.
+ */
+class NeuralCompressorLoss : public ILoss
+{
+public:
+    FeatureTensor calculate(const FeatureTensor& input,
+                            const FeatureTensor& output) const override
+    {
+        Eigen::VectorXf x = getRowVector(input);
+        Eigen::VectorXf y = getRowVector(output);
+
+        const int N = (int)y.size();
+        if (N == 0)
+            return toFeatureTensor(y);
+
+        // =========================
+        // 1️⃣ RMS CONTROL
+        // =========================
+        float rmsIn  = std::sqrt(x.array().square().mean() + eps);
+        float rmsOut = std::sqrt(y.array().square().mean() + eps);
+
+        float targetRms = rmsIn * (1.0f - rmsReduction);
+        float rmsDiff   = rmsOut - targetRms;
+
+        Eigen::VectorXf gradRms =
+            (2.0f / N) * rmsDiff * (y / (rmsOut + eps));
+
+        // =========================
+        // 2️⃣ CREST FACTOR CONTROL
+        // =========================
+        float peak  = y.cwiseAbs().maxCoeff();
+        float crest = peak / (rmsOut + eps);
+
+        float crestDiff = crest - crestTarget;
+
+        Eigen::VectorXf gradCrest =
+            crestDiff * (y / (rmsOut + eps));
+
+        // =========================
+        // 3️⃣ TRANSIENT CONTROL
+        // =========================
+        Eigen::VectorXf diffVec = y - prev;
+        float transientEnergy = diffVec.array().abs().mean();
+
+        float tDiff = transientEnergy - transientTarget;
+
+        Eigen::VectorXf gradTransient =
+            (tDiff > 0.0f ? tDiff : 0.0f) * diffVec;
+
+        // update previous frame (EMA)
+        prev = 0.95f * prev + 0.05f * y;
+
+        // =========================
+        // Combine (bounded)
+        // =========================
+        Eigen::VectorXf grad =
+              wRms  * gradRms
+            + wCrest * gradCrest
+            + wTransient * gradTransient;
+
+        // Soft clip gradient (critical for RT safety)
+        grad = grad.unaryExpr([](float v)
+        {
+            const float limit = 5.0f;
+            return std::max(-limit, std::min(limit, v));
+        });
+
+        return toFeatureTensor(grad);
+    }
+// target setters
+    void setTarget(float rmsReduction, float crestTarget, float transientTarget)
+    {
+        this->rmsReduction = rmsReduction;
+        this->crestTarget  = crestTarget;
+        this->transientTarget = transientTarget;
+    }
+private:
+
+    // --- User Targets ---
+    float rmsReduction = 0.15f;      // 15% RMS reduction
+    float crestTarget  = 3.0f;       // desired crest factor
+    float transientTarget = 0.02f;   // transient energy cap
+
+    // --- Weights ---
+    float wRms  = 0.4f;
+    float wCrest = 0.4f;
+    float wTransient = 0.2f;
+
+    float eps = 1e-8f;
+
+    mutable Eigen::VectorXf prev = Eigen::VectorXf::Zero(1);
 };
 // ============================================================
 // 1️⃣ Stereo Width Target Loss
