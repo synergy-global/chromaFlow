@@ -107,6 +107,20 @@ namespace ChromaFlow::Layers
             for (int i = 0; i < K; ++i)
                 weights(i) = clipf(weights(i), -wMax, wMax);
         }
+        void setDeltaAlpha(float a)
+        {
+            deltaAlpha = std::clamp(a, 0.0f, 0.9999f);
+        }
+
+        void setGradAlpha(float a)
+        {
+            gradAlpha = std::clamp(a, 0.0f, 0.9999f);
+        }
+
+        void setLearningRate(float lr_)
+        {
+            learningRate = std::clamp(lr_, 0.0f, 1e-2f);
+        }
 
     private:
         int K;
@@ -215,7 +229,25 @@ namespace ChromaFlow::Layers
             weights = weights.unaryExpr([this](float v)
                                         { return clipf(v, -wMax, wMax); });
         }
+        void setDeltaAlpha(float a)
+        {
+            deltaAlpha = std::clamp(a, 0.0f, 0.9999f);
+        }
 
+        void setGradAlpha(float a)
+        {
+            gradAlpha = std::clamp(a, 0.0f, 0.9999f);
+        }
+
+        void setEligibilityAlpha(float a)
+        {
+            alpha = std::clamp(a, 0.0f, 0.9999f);
+        }
+
+        void setLearningRate(float lr_)
+        {
+            lr = std::clamp(lr_, 0.0f, 1e-2f);
+        }
         void reset() override
         {
             delta.setZero();
@@ -281,8 +313,9 @@ namespace ChromaFlow::Layers
                 Eigen::VectorXf k = kT.data.row(0).transpose();
                 Eigen::VectorXf v = vT.data.row(0).transpose();
 
-                // elementwise “dot attention”
-                Eigen::VectorXf scores = (q.array() * k.array()) / std::sqrt((float)std::max(1, (int)q.size()));
+                Eigen::VectorXf scores =
+                    (q.array() * k.array()) /
+                    (std::sqrt((float)std::max(1, (int)q.size())) * temperature);
                 Eigen::VectorXf expS = (scores.array() - scores.maxCoeff()).exp().matrix();
                 const float denom = expS.sum();
 
@@ -357,6 +390,10 @@ namespace ChromaFlow::Layers
             valueLayer->learn(error);
         }
 
+        void setTemperature(float t)
+        {
+            temperature = std::clamp(t, 0.0f, 1.0f);
+        }
         void reset() override
         {
             last_input.setZero();
@@ -385,7 +422,7 @@ namespace ChromaFlow::Layers
         int heads = 4;
         int d_model = 0;
         int d_k = 0;
-
+        float temperature = 1.0f;
         Eigen::MatrixXf last_input;
         Eigen::VectorXf last_out_vec;
 
@@ -457,6 +494,20 @@ namespace ChromaFlow::Layers
 
             Wh = Wh.unaryExpr([this](float v)
                               { return clipf(v, -wMax, wMax); });
+        }
+        void setDeltaAlpha(float a)
+        {
+            deltaAlpha = std::clamp(a, 0.0f, 0.9999f);
+        }
+
+        void setGradAlpha(float a)
+        {
+            gradAlpha = std::clamp(a, 0.0f, 0.9999f);
+        }
+
+        void setLearningRate(float lr_)
+        {
+            learningRate = std::clamp(lr_, 0.0f, 1e-3f);
         }
 
     private:
